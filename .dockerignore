@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+dist
+**/dist
+workspace
+**/workspace
+.runtime
+.git
+.env
+apps/server/.env
+apps/server/config/model-provider.json
+.DS_Store
+*.log

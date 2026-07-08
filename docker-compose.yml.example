@@ -1,0 +1,19 @@
+services:
+  svg-transform-core:
+    build: .
+    image: svg-transform-core:local
+    ports:
+      - "4310:4310"
+    environment:
+      PORT: "4310"
+      WORKSPACE: /app/workspace
+      MODEL_PROVIDER_CONFIG: /app/config/model-provider.json
+      MAX_CONCURRENT_AGENTS: "2"
+      MAX_PARALLEL_MODULE_AGENTS: "5"
+      SESSION_CHAT_DISABLED: "0"
+      SESSION_DELETE_DISABLED: "0"
+    # env_file:
+    #   - ./.runtime/core.env
+    volumes:
+      - ./workspace:/app/workspace
+      - ./.runtime/model-provider.json:/app/config/model-provider.json:ro

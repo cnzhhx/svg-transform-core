@@ -1,0 +1,38 @@
+{
+  "name": "@svg-transform/server",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "pnpm run lint:types && pnpm run build:mcp",
+    "build:mcp": "node scripts/build-mcp.mjs",
+    "dev": "NODE_ENV=development tsx src/server.ts",
+    "lint:types": "tsc --noEmit",
+    "start": "NODE_ENV=production tsx src/server.ts",
+    "test": "tsx --test tests/unit/**/*.test.ts"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-vue": "6.0.7",
+    "archiver": "7.0.1",
+    "express": "5.2.1",
+    "multer": "1.4.5-lts.2",
+    "nanoid": "5.1.11",
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "vite": "8.0.16",
+    "vue": "3.5.38",
+    "ws": "8.21.0"
+  },
+  "devDependencies": {
+    "@types/archiver": "7.0.0",
+    "@types/express": "5.0.6",
+    "@types/express-serve-static-core": "5.1.1",
+    "@types/multer": "1.4.13",
+    "@types/node": "25.9.3",
+    "playwright": "1.61.1",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3"
+  }
+}

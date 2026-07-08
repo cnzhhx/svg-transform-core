@@ -1,0 +1,9 @@
+node_modules/
+dist/
+workspace/
+.runtime/
+.env
+apps/server/.env
+apps/server/config/model-provider.json
+.DS_Store
+*.log
