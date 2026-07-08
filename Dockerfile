@@ -42,17 +42,21 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/server/package.json apps/server/package.json
 COPY packages/client/package.json packages/client/package.json
-RUN pnpm install --frozen-lockfile --prod=false
-
-COPY . .
-
-RUN pnpm -C apps/server exec playwright install --with-deps chromium \
+RUN pnpm install --frozen-lockfile --prod=false \
+  && pnpm -C apps/server exec playwright install --with-deps chromium \
   && chromium_bin="$(find /opt/ms-playwright -path '*/chrome-linux/chrome' -type f -print -quit)" \
   && test -n "$chromium_bin" \
   && ln -sf "$chromium_bin" /usr/local/bin/chromium-playwright \
   && /usr/local/bin/chromium-playwright --version \
   && npm install -g opencode-ai@1.17.7 \
-  && pnpm run build \
+  && npm cache clean --force \
+  && pnpm store prune \
+  && rm -rf /root/.npm /root/.cache/pnpm /tmp/*
+
+COPY . .
+
+RUN pnpm run build \
+  && rm -rf /root/.npm /root/.cache/pnpm /tmp/* \
   && mkdir -p /app/workspace /app/config
 
 EXPOSE 4310
