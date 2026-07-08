@@ -34,7 +34,16 @@ type ModelDefinition = Partial<{
 }>;
 
 type ModelProviderFileConfig = Partial<{
+  model: string;
+  /**
+   * @deprecated Use `model` instead. Kept as a compatibility fallback for
+   * existing runtime config files.
+   */
   moduleAgentModel: string;
+  /**
+   * @deprecated Use `model` instead. Kept as a compatibility fallback for
+   * existing runtime config files.
+   */
   otherModel: string;
   models: Record<string, ModelDefinition>;
 }>;
@@ -233,10 +242,15 @@ const resolveRequestedModel = ({
   fileConfig: ModelProviderFileConfig;
   role: ModelConfigRole;
 }) => {
-  const configuredModel =
+  const legacyRoleModel =
     role === "moduleAgent"
       ? fileConfig.moduleAgentModel
       : fileConfig.otherModel;
+  const configuredModel =
+    fileConfig.model ??
+    legacyRoleModel ??
+    fileConfig.moduleAgentModel ??
+    fileConfig.otherModel;
   const inlineModelId = readRoleAwareEnv(role, "MODEL_ID");
   return (
     readRoleAwareEnv(role, "MODEL_CONFIG_ID") ??
@@ -246,9 +260,6 @@ const resolveRequestedModel = ({
     trimToUndefined(configuredModel)
   );
 };
-
-const getConfiguredModelKey = (role: ModelConfigRole) =>
-  role === "moduleAgent" ? "moduleAgentModel" : "otherModel";
 
 const getDefaultThinking = (_role: ModelConfigRole) => true;
 
@@ -290,7 +301,7 @@ const resolveModelProviderConfig = ({
   const requestedModel = resolveRequestedModel({ fileConfig, role });
   if (!requestedModel) {
     throw new Error(
-      `Missing model config for ${role} role. Set ${getConfiguredModelKey(role)} in ${getModelProviderConfigPath()} or provide ${formatRoleAwareEnvNames(role, ["MODEL_CONFIG_ID", "MODEL_PROVIDER"])}.`,
+      `Missing model config for ${role} role. Set model in ${getModelProviderConfigPath()} or provide ${formatRoleAwareEnvNames(role, ["MODEL_CONFIG_ID", "MODEL_PROVIDER"])}.`,
     );
   }
   const { modelConfigId, modelConfig } = resolveModelDefinition({

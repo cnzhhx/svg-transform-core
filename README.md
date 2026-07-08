@@ -158,8 +158,7 @@ Minimal shape:
 
 ```json
 {
-  "moduleAgentModel": "main",
-  "otherModel": "main",
+  "model": "main",
   "models": {
     "main": {
       "runtime": "opencode",
@@ -176,6 +175,9 @@ Minimal shape:
   }
 }
 ```
+
+Top-level `model` selects an entry in `models`; nested `models.<name>.model`
+is the provider model id.
 
 Use `apiKeyEnv` and pass the actual key through Docker:
 
