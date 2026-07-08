@@ -1,10 +1,29 @@
 {
   "name": "@svg-transform/core-client",
-  "version": "0.1.0",
+  "version": "0.1.1",
+  "description": "HTTP client SDK for the svg-transform-core service.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cnzhhx/svg-transform-core.git",
+    "directory": "packages/client"
+  },
+  "homepage": "https://github.com/cnzhhx/svg-transform-core#readme",
+  "bugs": {
+    "url": "https://github.com/cnzhhx/svg-transform-core/issues"
+  },
+  "keywords": [
+    "svg",
+    "transform",
+    "html",
+    "vue",
+    "react",
+    "client"
+  ],
+  "sideEffects": false,
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
