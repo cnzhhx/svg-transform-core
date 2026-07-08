@@ -77,6 +77,31 @@ pnpm -C packages/client run build
 
 ## Docker
 
+Published images are built by GitHub Actions for `linux/amd64` and
+`linux/arm64`:
+
+```bash
+docker pull ghcr.io/cnzhhx/svg-transform-core:0.1.0
+```
+
+Use the published image with the local Docker helper:
+
+```bash
+mkdir -p .runtime
+cp apps/server/config/model-provider.example.json .runtime/model-provider.json
+SVG_TRANSFORM_CORE_IMAGE=ghcr.io/cnzhhx/svg-transform-core:0.1.0 pnpm docker:recreate
+```
+
+Publish a new Docker image by pushing a version tag:
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The workflow also updates `ghcr.io/cnzhhx/svg-transform-core:latest` for
+version tags.
+
 ```bash
 cp docker-compose.yml.example docker-compose.yml
 mkdir -p .runtime
