@@ -256,7 +256,7 @@ For non-Docker server development:
 pnpm install
 cp apps/server/config/model-provider.example.json apps/server/config/model-provider.json
 pnpm run build
-PORT=4310 SESSION_CHAT_DISABLED=0 pnpm run dev
+PORT=4310 pnpm run dev
 ```
 
 Create a dry-run job without consuming model quota:
@@ -282,7 +282,6 @@ Server config lives under `apps/server`.
 - `CHROMIUM_PATH`, `CHROME_PATH`, or `BROWSER_PATH`: optional browser override.
 - `MAX_CONCURRENT_AGENTS`: max active jobs.
 - `MAX_PARALLEL_MODULE_AGENTS`: per-job module concurrency.
-- `SESSION_CHAT_DISABLED=0`: keep chat repair enabled.
 
 Docker sets `WORKSPACE=/app/workspace` and
 `MODEL_PROVIDER_CONFIG=/app/config/model-provider.json`.

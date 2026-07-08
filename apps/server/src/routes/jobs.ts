@@ -8,10 +8,6 @@ import multer from "multer";
 import { nanoid } from "nanoid";
 
 import {
-  getSessionChatDisabled,
-  getSessionDeleteDisabled,
-} from "../config/index.js";
-import {
   getOutputFormatLabel,
   parseOutputFormat,
   resolveOutputTarget,
@@ -254,10 +250,6 @@ router.post("/jobs/:id/messages", (req, res) => {
     res.status(404).json({ error: "Job not found" });
     return;
   }
-  if (getSessionChatDisabled()) {
-    res.status(403).json({ error: "Chat repair is disabled" });
-    return;
-  }
   if (!text) {
     res.status(400).json({ error: "Message text is required" });
     return;
@@ -409,11 +401,6 @@ const scheduleForceDeleteJobFiles = (job: Session, phase: "initial" | "final") =
 };
 
 router.delete("/jobs/:id", async (req, res) => {
-  if (getSessionDeleteDisabled()) {
-    res.status(403).json({ error: "Job deletion is disabled" });
-    return;
-  }
-
   const job = sessionStore.get(String(req.params["id"] ?? ""));
   if (!job) {
     res.status(404).json({ error: "Job not found" });

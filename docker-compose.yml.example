@@ -10,8 +10,6 @@ services:
       MODEL_PROVIDER_CONFIG: /app/config/model-provider.json
       MAX_CONCURRENT_AGENTS: "2"
       MAX_PARALLEL_MODULE_AGENTS: "5"
-      SESSION_CHAT_DISABLED: "0"
-      SESSION_DELETE_DISABLED: "0"
     # env_file:
     #   - ./.runtime/core.env
     volumes:

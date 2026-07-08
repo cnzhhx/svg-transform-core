@@ -242,8 +242,6 @@ const buildBackendConfig = () => {
         "ARCHIVE_COMMAND_OUTPUT_MAX_CHARS",
         5000,
       ),
-      chatDisabled: readTruthyFlag("SESSION_CHAT_DISABLED", false),
-      deleteDisabled: readTruthyFlag("SESSION_DELETE_DISABLED"),
       localStorageEnabled: readTruthyFlag("SESSION_LOCAL_STORAGE_ENABLED"),
       visionTextTimeoutMs: readNumber("VISION_TEXT_TIMEOUT_MS", 300_000),
     },
