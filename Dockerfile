@@ -42,16 +42,17 @@ WORKDIR /app
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/server/package.json apps/server/package.json
 COPY packages/client/package.json packages/client/package.json
-RUN pnpm install --frozen-lockfile --prod=false \
-  && pnpm -C apps/server exec playwright install --with-deps chromium \
-  && chromium_bin="$(find /opt/ms-playwright -path '*/chrome-linux/chrome' -type f -print -quit)" \
-  && test -n "$chromium_bin" \
-  && ln -sf "$chromium_bin" /usr/local/bin/chromium-playwright \
-  && /usr/local/bin/chromium-playwright --version \
-  && npm install -g opencode-ai@1.17.7 \
-  && npm cache clean --force \
-  && pnpm store prune \
-  && rm -rf /root/.npm /root/.cache/pnpm /tmp/*
+RUN set -eux; \
+  pnpm install --frozen-lockfile --prod=false; \
+  pnpm -C apps/server exec playwright install --with-deps chromium; \
+  chromium_bin="$(find /opt/ms-playwright -type f -path '*/chrome-linux*/chrome' -print -quit)"; \
+  test -n "$chromium_bin"; \
+  ln -sf "$chromium_bin" /usr/local/bin/chromium-playwright; \
+  /usr/local/bin/chromium-playwright --version; \
+  npm install -g opencode-ai@1.17.7; \
+  npm cache clean --force; \
+  pnpm store prune; \
+  rm -rf /root/.npm /root/.cache/pnpm /tmp/*
 
 COPY . .
 
