@@ -1,11 +1,11 @@
 {
   "name": "@svg-transform/server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "build": "pnpm run lint:types && pnpm run build:mcp",
+    "build": "tsc --noEmit && node scripts/build-mcp.mjs",
     "build:mcp": "node scripts/build-mcp.mjs",
     "dev": "NODE_ENV=development tsx src/server.ts",
     "lint:types": "tsc --noEmit",

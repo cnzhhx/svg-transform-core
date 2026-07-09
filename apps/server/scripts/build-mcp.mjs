@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { rm, mkdir, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const rootDir = dirname(dirname(fileURLToPath(import.meta.url)));
 const distDir = join(rootDir, "dist");
-const pnpmBin = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const require = createRequire(import.meta.url);
+const tscBin = require.resolve("typescript/bin/tsc");
 
 const run = (command, args) => {
   const result = spawnSync(command, args, {
@@ -28,9 +30,8 @@ const run = (command, args) => {
 await rm(distDir, { force: true, recursive: true });
 await mkdir(distDir, { recursive: true });
 
-run(pnpmBin, [
-  "exec",
-  "tsc",
+run(process.execPath, [
+  tscBin,
   "--target",
   "ES2022",
   "--module",

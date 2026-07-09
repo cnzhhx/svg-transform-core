@@ -4,7 +4,10 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveModelConfigForRole } from "../../src/config/model-provider.js";
+import {
+  resolveModelConfigForRole,
+  resolveModelNameForRequest,
+} from "../../src/config/model-provider.js";
 import type { ModelConfigRole } from "../../src/config/model-provider.js";
 
 const MODEL_ENV_NAMES = [
@@ -51,36 +54,123 @@ const withCleanModelEnv = <T>(run: () => T) => {
 };
 
 describe("model provider config", () => {
-  it("uses one configured model for all model roles", () =>
+  const writeConfig = (
+    configPath: string,
+    payload: Record<string, unknown>,
+  ) => {
+    writeFileSync(configPath, JSON.stringify(payload));
+  };
+
+  const writeStandardConfig = (configPath: string) => {
+    writeConfig(configPath, {
+      models: {
+        first: {
+          runtime: "opencode",
+          wireApi: "chat-completions",
+          provider: "unit-provider-first",
+          baseURL: "https://api-first.example.test/v1",
+          apiKey: "unit-key",
+          model: "unit-model-first",
+        },
+        second: {
+          runtime: "opencode",
+          wireApi: "chat-completions",
+          provider: "unit-provider-second",
+          baseURL: "https://api-second.example.test/v1",
+          apiKey: "unit-key",
+          model: "unit-model-second",
+        },
+      },
+    });
+  };
+
+  it("uses the explicitly requested model for all model roles", () =>
     withCleanModelEnv(() => {
       const dir = mkdtempSync(path.join(tmpdir(), "svg-transform-model-"));
       const configPath = path.join(dir, "model-provider.json");
       try {
-        writeFileSync(
-          configPath,
-          JSON.stringify({
-            model: "main",
-            models: {
-              main: {
-                runtime: "opencode",
-                wireApi: "chat-completions",
-                provider: "unit-provider",
-                baseURL: "https://api.example.test/v1",
-                apiKey: "unit-key",
-                model: "unit-model-id",
-              },
-            },
-          }),
-        );
+        writeStandardConfig(configPath);
         process.env.MODEL_PROVIDER_CONFIG = configPath;
 
         const roles: ModelConfigRole[] = ["text", "vision", "moduleAgent"];
         for (const role of roles) {
-          const config = resolveModelConfigForRole(role);
-          assert.equal(config.id, "main");
-          assert.equal(config.provider, "unit-provider");
-          assert.equal(config.model, "unit-model-id");
+          const config = resolveModelConfigForRole(role, "second");
+          assert.equal(config.id, "second");
+          assert.equal(config.provider, "unit-provider-second");
+          assert.equal(config.model, "unit-model-second");
         }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }));
+
+  it("uses the first models entry when the request omits model", () =>
+    withCleanModelEnv(() => {
+      const dir = mkdtempSync(path.join(tmpdir(), "svg-transform-model-"));
+      const configPath = path.join(dir, "model-provider.json");
+      try {
+        writeStandardConfig(configPath);
+        process.env.MODEL_PROVIDER_CONFIG = configPath;
+
+        assert.equal(resolveModelNameForRequest(), "first");
+        const config = resolveModelConfigForRole("text");
+        assert.equal(config.id, "first");
+        assert.equal(config.provider, "unit-provider-first");
+        assert.equal(config.model, "unit-model-first");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }));
+
+  it("rejects unknown requested model names", () =>
+    withCleanModelEnv(() => {
+      const dir = mkdtempSync(path.join(tmpdir(), "svg-transform-model-"));
+      const configPath = path.join(dir, "model-provider.json");
+      try {
+        writeStandardConfig(configPath);
+        process.env.MODEL_PROVIDER_CONFIG = configPath;
+
+        assert.throws(
+          () => resolveModelNameForRequest("missing"),
+          /Unknown model config "missing"/,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }));
+
+  it("rejects top-level model in provider config", () =>
+    withCleanModelEnv(() => {
+      const dir = mkdtempSync(path.join(tmpdir(), "svg-transform-model-"));
+      const configPath = path.join(dir, "model-provider.json");
+      try {
+        writeConfig(configPath, {
+          model: "first",
+          models: {},
+        });
+        process.env.MODEL_PROVIDER_CONFIG = configPath;
+
+        assert.throws(
+          () => resolveModelNameForRequest(),
+          /must not define top-level model/,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }));
+
+  it("does not let model selection env override the requested model", () =>
+    withCleanModelEnv(() => {
+      const dir = mkdtempSync(path.join(tmpdir(), "svg-transform-model-"));
+      const configPath = path.join(dir, "model-provider.json");
+      try {
+        writeStandardConfig(configPath);
+        process.env.MODEL_PROVIDER_CONFIG = configPath;
+        process.env.MODEL_CONFIG_ID = "first";
+        process.env.TEXT_MODEL_CONFIG_ID = "first";
+
+        const config = resolveModelConfigForRole("text", "second");
+        assert.equal(config.id, "second");
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }

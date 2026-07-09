@@ -9,6 +9,7 @@ import { sessionStore } from "../session-store.js";
 import type { AgentTurnMetrics, Usage } from "./agent-runtime/index.js";
 
 type ModelUsageContext = {
+  model?: string;
   sessionId?: string;
   source?: string;
 };
@@ -54,6 +55,8 @@ const withModelUsageContext = <T>(
   context: ModelUsageContext,
   callback: () => T,
 ) => usageContext.run({ ...usageContext.getStore(), ...context }, callback);
+
+const getModelUsageContextModel = () => usageContext.getStore()?.model;
 
 const recordModelUsage = ({
   inputKind,
@@ -123,4 +126,8 @@ const recordModelUsage = ({
   });
 };
 
-export { recordModelUsage, withModelUsageContext };
+export {
+  getModelUsageContextModel,
+  recordModelUsage,
+  withModelUsageContext,
+};

@@ -121,6 +121,7 @@ const TOP_LEVEL_KEYS = new Set<keyof Session>([
   'executionStartedAt',
   'threadId',
   'svgPath',
+  'model',
   'scale',
   'sessionDir',
   'artifactDir',
@@ -143,6 +144,8 @@ const TOP_LEVEL_KEYS = new Set<keyof Session>([
 const sanitizeCurrentSessionSnapshot = (value: unknown): Session | null => {
   if (!isRecord(value)) return null
   if (!isOutputFormat(value.outputFormat)) return null
+  const model = optionalString(value.model)?.trim()
+  if (!model) return null
   const outputFormat = value.outputFormat
   const outputTarget = sanitizeOutputTarget(value.outputTarget, outputFormat)
   if (!outputTarget) return null
@@ -152,6 +155,7 @@ const sanitizeCurrentSessionSnapshot = (value: unknown): Session | null => {
   }
   session.outputFormat = outputFormat
   session.outputTarget = outputTarget
+  session.model = model
   session.result = sanitizeResult(value.result, outputTarget)
   return session as Session
 }

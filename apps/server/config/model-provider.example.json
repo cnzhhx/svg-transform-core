@@ -1,5 +1,4 @@
 {
-  "model": "your-model",
   "models": {
     "your-model": {
       "runtime": "opencode",

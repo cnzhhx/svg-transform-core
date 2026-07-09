@@ -187,6 +187,7 @@ type Session = {
   executionStartedAt?: number
   threadId?: string
   svgPath: string
+  model: string
   scale?: number
   sessionDir: string
   artifactDir: string

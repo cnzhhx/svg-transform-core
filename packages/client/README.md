@@ -25,7 +25,7 @@ const client = createSvgTransformClient({
 const svg = await readFile("./design.svg");
 const job = await client.createJob(
   { file: svg, filename: "design.svg" },
-  { outputFormat: "html", scale: 1 },
+  { model: "main", outputFormat: "html", scale: 1 },
 );
 
 await client.startJob(job.jobId);

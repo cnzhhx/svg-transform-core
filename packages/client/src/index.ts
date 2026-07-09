@@ -61,6 +61,7 @@ type CoreJob = {
   jobId: string;
   logs: string[];
   messages: CoreJobMessage[];
+  model: string;
   outputFormat: CoreOutputFormat;
   progress?: CoreWorkflowProgress;
   result: CoreJobResult;
@@ -93,6 +94,7 @@ type CoreJobEvent =
 
 type CoreCreateJobOptions = {
   dryRun?: boolean;
+  model?: string;
   outputFormat?: CoreOutputFormat;
   scale?: number;
 };
@@ -237,6 +239,7 @@ const createSvgTransformClient = ({ baseUrl, fetch: customFetch }: CoreClientOpt
       toBlob(input.file, input.type),
       input.filename ?? "design.svg",
     );
+    if (options.model) form.append("model", options.model);
     if (options.outputFormat) form.append("outputFormat", options.outputFormat);
     if (options.scale !== undefined) form.append("scale", String(options.scale));
     if (options.dryRun !== undefined) form.append("dryRun", String(options.dryRun));

@@ -34,17 +34,6 @@ type ModelDefinition = Partial<{
 }>;
 
 type ModelProviderFileConfig = Partial<{
-  model: string;
-  /**
-   * @deprecated Use `model` instead. Kept as a compatibility fallback for
-   * existing runtime config files.
-   */
-  moduleAgentModel: string;
-  /**
-   * @deprecated Use `model` instead. Kept as a compatibility fallback for
-   * existing runtime config files.
-   */
-  otherModel: string;
   models: Record<string, ModelDefinition>;
 }>;
 
@@ -163,6 +152,11 @@ const readModelProviderConfig = (): ModelProviderFileConfig => {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error(`${configPath} must contain a JSON object`);
   }
+  if ("model" in parsed) {
+    throw new Error(
+      `${configPath} must not define top-level model. Pass model when creating a job or omit it to use the first models entry.`,
+    );
+  }
   return parsed as ModelProviderFileConfig;
 };
 
@@ -186,35 +180,15 @@ const requireConfigValue = ({
 };
 
 const resolveModelDefinition = ({
-  allowInlineModelDefinition = false,
   models,
   requestedModel,
 }: {
-  allowInlineModelDefinition?: boolean;
   models: Record<string, ModelDefinition>;
   requestedModel: string;
 }) => {
   const exactMatch = models[requestedModel];
   if (exactMatch)
     return { modelConfigId: requestedModel, modelConfig: exactMatch };
-
-  for (const [modelConfigId, modelConfig] of Object.entries(models)) {
-    if (
-      modelConfig.provider === requestedModel ||
-      modelConfig.model === requestedModel
-    ) {
-      return { modelConfigId, modelConfig };
-    }
-  }
-
-  if (allowInlineModelDefinition) {
-    return {
-      modelConfigId: requestedModel,
-      modelConfig: {
-        provider: requestedModel,
-      } satisfies ModelDefinition,
-    };
-  }
 
   throw new Error(
     `Unknown model config "${requestedModel}". Add it to ${getModelProviderConfigPath()}.`,
@@ -235,29 +209,24 @@ const formatRoleAwareEnvNames = (role: ModelConfigRole, envNames: string[]) => {
   return [...roleEnvNames, ...envNames].join(", ");
 };
 
-const resolveRequestedModel = ({
-  fileConfig,
-  role,
+const getModelConfigKeys = (models: Record<string, ModelDefinition>) =>
+  Object.keys(models).filter((key) => key.trim());
+
+const resolveRequestedModelName = ({
+  models,
+  requestedModel,
 }: {
-  fileConfig: ModelProviderFileConfig;
-  role: ModelConfigRole;
+  models: Record<string, ModelDefinition>;
+  requestedModel?: string;
 }) => {
-  const legacyRoleModel =
-    role === "moduleAgent"
-      ? fileConfig.moduleAgentModel
-      : fileConfig.otherModel;
-  const configuredModel =
-    fileConfig.model ??
-    legacyRoleModel ??
-    fileConfig.moduleAgentModel ??
-    fileConfig.otherModel;
-  const inlineModelId = readRoleAwareEnv(role, "MODEL_ID");
-  return (
-    readRoleAwareEnv(role, "MODEL_CONFIG_ID") ??
-    readRoleAwareEnv(role, "MODEL_PROVIDER") ??
-    readRoleAwareEnv(role, "MODEL_PROVIDER_NAME") ??
-    inlineModelId ??
-    trimToUndefined(configuredModel)
+  const explicitModel = trimToUndefined(requestedModel);
+  if (explicitModel) return explicitModel;
+
+  const firstModel = getModelConfigKeys(models)[0];
+  if (firstModel) return firstModel;
+
+  throw new Error(
+    `Missing model config. Add at least one models entry to ${getModelProviderConfigPath()}.`,
   );
 };
 
@@ -267,13 +236,6 @@ const getDefaultReasoningEffort = (role: ModelConfigRole) =>
   role === "moduleAgent"
     ? AGENT_REASONING_EFFORTS.default
     : AGENT_REASONING_EFFORTS.support;
-
-const hasInlineModelDefinition = (role: ModelConfigRole) =>
-  Boolean(
-    readRoleAwareEnv(role, "MODEL_BASE_URL") &&
-      readRoleAwareEnv(role, "MODEL_ID") &&
-      readRoleAwareEnv(role, "MODEL_API_KEY"),
-  );
 
 const validateModelConfig = ({
   config,
@@ -290,24 +252,21 @@ const validateModelConfig = ({
 };
 
 const resolveModelProviderConfig = ({
-  fileConfig,
   models,
+  requestedModel,
   role,
 }: {
-  fileConfig: ModelProviderFileConfig;
   models: Record<string, ModelDefinition>;
+  requestedModel?: string;
   role: ModelConfigRole;
 }): ModelProviderConfig => {
-  const requestedModel = resolveRequestedModel({ fileConfig, role });
-  if (!requestedModel) {
-    throw new Error(
-      `Missing model config for ${role} role. Set model in ${getModelProviderConfigPath()} or provide ${formatRoleAwareEnvNames(role, ["MODEL_CONFIG_ID", "MODEL_PROVIDER"])}.`,
-    );
-  }
-  const { modelConfigId, modelConfig } = resolveModelDefinition({
-    allowInlineModelDefinition: hasInlineModelDefinition(role),
+  const requestedModelName = resolveRequestedModelName({
     models,
     requestedModel,
+  });
+  const { modelConfigId, modelConfig } = resolveModelDefinition({
+    models,
+    requestedModel: requestedModelName,
   });
   const configuredProvider = trimToUndefined(modelConfig.provider);
   const providerLabel =
@@ -406,16 +365,34 @@ const resolveModelProviderConfig = ({
   return resolvedConfig;
 };
 
-const resolveModelConfigForRole = (role: ModelConfigRole) => {
+const resolveModelConfigForRole = (
+  role: ModelConfigRole,
+  requestedModel?: string,
+) => {
   const fileConfig = readModelProviderConfig();
   return resolveModelProviderConfig({
-    fileConfig,
     models: fileConfig.models ?? {},
+    requestedModel,
     role,
   });
 };
 
-export { resolveModelConfigForRole };
+const resolveModelNameForRequest = (requestedModel?: string) => {
+  const fileConfig = readModelProviderConfig();
+  const models = fileConfig.models ?? {};
+  const requestedModelName = resolveRequestedModelName({
+    models,
+    requestedModel,
+  });
+  // Validate that the resolved name maps to a real models entry (throws if not).
+  resolveModelDefinition({
+    models,
+    requestedModel: requestedModelName,
+  });
+  return requestedModelName;
+};
+
+export { resolveModelConfigForRole, resolveModelNameForRequest };
 export type {
   ModelConfigRole,
   ModelProviderConfig,

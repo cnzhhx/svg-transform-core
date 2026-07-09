@@ -139,6 +139,7 @@ const jobForApi = (
     jobId: job.id,
     logs: safeLogsForApi(job.logs),
     messages: safeMessagesForApi(job.messages),
+    model: job.model,
     outputFormat: job.outputFormat,
     progress: job.progress,
     result: publicResultForJob(job, { baseUrl: jobUrl }),

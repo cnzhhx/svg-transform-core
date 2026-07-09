@@ -15,7 +15,10 @@ import type {
   ThreadOptions,
 } from "./agent-runtime/index.js";
 import { AGENT_REASONING_EFFORTS } from "../config/agent-reasoning.js";
-import { recordModelUsage } from "./model-usage.js";
+import {
+  getModelUsageContextModel,
+  recordModelUsage,
+} from "./model-usage.js";
 
 const createThreadOptions = (
   modelConfig: Pick<ModelProviderConfig, "model" | "reasoningEffort">,
@@ -124,7 +127,10 @@ const startAgentThread = (
   } = {},
 ) => {
   const modelRole = input.modelRole ?? "text";
-  const modelConfig = resolveModelConfigForRole(modelRole);
+  const modelConfig = resolveModelConfigForRole(
+    modelRole,
+    getModelUsageContextModel(),
+  );
   const runtime = getAgentRuntime(modelConfig);
   return trackThreadUsage({
     modelConfig,
@@ -145,7 +151,10 @@ const resumeAgentThread = (
   } = {},
 ) => {
   const modelRole = input.modelRole ?? "text";
-  const modelConfig = resolveModelConfigForRole(modelRole);
+  const modelConfig = resolveModelConfigForRole(
+    modelRole,
+    getModelUsageContextModel(),
+  );
   const runtime = getAgentRuntime(modelConfig);
   return trackThreadUsage({
     modelConfig,

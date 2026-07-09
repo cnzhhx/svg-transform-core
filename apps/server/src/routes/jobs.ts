@@ -14,6 +14,7 @@ import {
 } from "../core/output-target.js";
 import type { OutputFormat } from "../core/output-target.js";
 import { getWorkspaceRoot, isInsidePath } from "../core/paths.js";
+import { resolveModelNameForRequest } from "../config/model-provider.js";
 import { isCompletedJobStatus, jobForApi } from "./job-api.js";
 import { cancelSessionRun, enqueueSession } from "../pipeline/agent-runner/index.js";
 import {
@@ -40,9 +41,11 @@ const getSvgDesignName = (value: string) =>
   path.basename(value, path.extname(value)).trim();
 
 const parseScale = (value: unknown) => {
-  const parsed = Number(value);
-  if (parsed === 2) return 2;
-  return 1;
+  if (value === undefined) return 1;
+  const parsed =
+    typeof value === "string" ? Number(value.trim()) : Number(value);
+  if (parsed === 1 || parsed === 2) return parsed;
+  throw new Error("Invalid scale: expected 1 or 2");
 };
 
 const parseDryRun = (value: unknown) => {
@@ -50,20 +53,8 @@ const parseDryRun = (value: unknown) => {
   return normalized === "1" || normalized === "true" || normalized === "yes";
 };
 
-const JOB_CREATE_FIELD_KEYS = new Set([
-  "dryRun",
-  "outputFormat",
-  "scale",
-]);
-
-const findUnsupportedCreateField = (body: unknown) => {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-  return (
-    Object.keys(body as Record<string, unknown>).find(
-      (key) => !JOB_CREATE_FIELD_KEYS.has(key),
-    ) ?? null
-  );
-};
+const trimBodyString = (value: unknown) =>
+  (value === undefined ? "" : String(value).trim()) || undefined;
 
 const canStartJob = (status: string) =>
   status === "draft" ||
@@ -114,12 +105,6 @@ router.post("/jobs", async (req, res) => {
         return;
       }
 
-      const unsupportedField = findUnsupportedCreateField(req.body);
-      if (unsupportedField) {
-        await badRequest(`Unsupported job field: ${unsupportedField}`);
-        return;
-      }
-
       const originalName = decodeOriginalName(file.originalname);
       const designName = getSvgDesignName(originalName);
       if (!designName) {
@@ -127,9 +112,12 @@ router.post("/jobs", async (req, res) => {
         return;
       }
 
-      const scale = parseScale(req.body?.scale);
+      let scale: 1 | 2;
+      let model: string;
       let outputFormat: OutputFormat;
       try {
+        scale = parseScale(req.body?.scale);
+        model = resolveModelNameForRequest(trimBodyString(req.body?.model));
         outputFormat = req.body?.outputFormat === undefined
           ? "html"
           : parseOutputFormat(req.body.outputFormat);
@@ -157,6 +145,7 @@ router.post("/jobs", async (req, res) => {
         id: jobId,
         designName,
         svgPath,
+        model,
         scale,
         artifactDir,
         sessionDir: jobDir,
@@ -183,7 +172,7 @@ router.post("/jobs", async (req, res) => {
             role: "system",
             kind: "chat",
             text:
-              `Created job ${jobId} for ${originalName}. Output format: ${getOutputFormatLabel(outputFormat)}. The core service will run SVG analysis, module generation, merge, verification, and artifact export.`,
+              `Created job ${jobId} for ${originalName}. Model: ${model}. Output format: ${getOutputFormatLabel(outputFormat)}. The core service will run SVG analysis, module generation, merge, verification, and artifact export.`,
             createdAt: Date.now(),
           },
         ],
@@ -234,22 +223,18 @@ router.post("/jobs/:id/start", (req, res) => {
     res.status(409).json({ error: `Cannot start job from status ${job.status}` });
     return;
   }
-  if (req.body && typeof req.body === "object" && Object.keys(req.body).length > 0) {
-    res.status(400).json({ error: "Unsupported start body" });
-    return;
-  }
   enqueueSession(job.id);
   res.json({ jobId: job.id, status: "queued" });
 });
 
 router.post("/jobs/:id/messages", (req, res) => {
   const job = sessionStore.get(String(req.params["id"] ?? ""));
-  const text = String(req.body?.text ?? "").trim();
-  const moduleId = String(req.body?.moduleId ?? "").trim();
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;
   }
+  const text = String(req.body?.text ?? "").trim();
+  const moduleId = String(req.body?.moduleId ?? "").trim();
   if (!text) {
     res.status(400).json({ error: "Message text is required" });
     return;

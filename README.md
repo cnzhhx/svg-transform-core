@@ -4,7 +4,7 @@ Core SVG transform service plus a lightweight HTTP client SDK.
 
 Published artifacts:
 
-- Docker image: `ghcr.io/cnzhhx/svg-transform-core:0.1.0`
+- Docker image: `ghcr.io/cnzhhx/svg-transform-core:0.2.0`
 - npm SDK: `@svg-transform/core-client`
 
 The service is intentionally core-only. It does not include account systems,
@@ -28,8 +28,9 @@ YOUR_PROVIDER_API_KEY=replace-me
 EOF
 ```
 
-Edit `.runtime/model-provider.json` so `baseURL`, `provider`, `model`, and
-`apiKeyEnv` match your model provider. Keep real keys in `.runtime/core.env`.
+Edit `.runtime/model-provider.json` so each entry in `models` has the right
+`baseURL`, `provider`, provider model id, and `apiKeyEnv`. Keep real keys in
+`.runtime/core.env`.
 
 Start the published Docker image:
 
@@ -42,7 +43,7 @@ docker run -d \
   -e MAX_PARALLEL_MODULE_AGENTS=5 \
   -v "$PWD/workspace:/app/workspace" \
   -v "$PWD/.runtime/model-provider.json:/app/config/model-provider.json:ro" \
-  ghcr.io/cnzhhx/svg-transform-core:0.1.0
+  ghcr.io/cnzhhx/svg-transform-core:0.2.0
 ```
 
 Check health:
@@ -57,6 +58,7 @@ Upload an SVG:
 
 ```bash
 curl -F svg=@design.svg \
+  -F model=main \
   -F outputFormat=html \
   -F scale=1 \
   http://127.0.0.1:4310/api/jobs
@@ -108,7 +110,7 @@ console.log(await client.health());
 const svg = await readFile("./design.svg");
 const job = await client.createJob(
   { file: svg, filename: "design.svg" },
-  { outputFormat: "html", scale: 1 },
+  { model: "main", outputFormat: "html", scale: 1 },
 );
 
 const events = client.connectJobEvents(job.jobId, {
@@ -158,7 +160,6 @@ Minimal shape:
 
 ```json
 {
-  "model": "main",
   "models": {
     "main": {
       "runtime": "opencode",
@@ -176,8 +177,9 @@ Minimal shape:
 }
 ```
 
-Top-level `model` selects an entry in `models`; nested `models.<name>.model`
-is the provider model id.
+`models` is an object map. The upload `model` field selects one of its keys; if
+the upload omits `model`, the service uses the first key in `models`. Nested
+`models.<name>.model` is the provider model id.
 
 Use `apiKeyEnv` and pass the actual key through Docker:
 
@@ -206,7 +208,7 @@ EOF
 Pull the published image:
 
 ```bash
-docker pull ghcr.io/cnzhhx/svg-transform-core:0.1.0
+docker pull ghcr.io/cnzhhx/svg-transform-core:0.2.0
 ```
 
 The `latest` tag is also updated on version releases:
@@ -221,7 +223,7 @@ container:
 ```bash
 mkdir -p .runtime
 cp apps/server/config/model-provider.example.json .runtime/model-provider.json
-SVG_TRANSFORM_CORE_IMAGE=ghcr.io/cnzhhx/svg-transform-core:0.1.0 pnpm docker:recreate
+SVG_TRANSFORM_CORE_IMAGE=ghcr.io/cnzhhx/svg-transform-core:0.2.0 pnpm docker:recreate
 ```
 
 Useful helper commands:
@@ -293,8 +295,8 @@ Docker sets `WORKSPACE=/app/workspace` and
 Publish a new Docker image by pushing a version tag:
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 Publish the SDK from `packages/client`:

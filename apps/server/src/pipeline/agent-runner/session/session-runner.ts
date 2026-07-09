@@ -99,11 +99,14 @@ const dequeueAllPendingUserMessages = (sessionId: string) => {
   return messages;
 };
 
-const runSession = (sessionId: string, controller: AbortController) =>
-  withModelUsageContext({ sessionId, source: "session" }, async () => {
-    const session = sessionStore.get(sessionId);
-    if (!session) return;
-
+const runSession = async (sessionId: string, controller: AbortController) => {
+  const session = sessionStore.get(sessionId);
+  if (!session) return;
+  return withModelUsageContext({
+    model: session.model,
+    sessionId,
+    source: "session",
+  }, async () => {
     sessionStore.markExecutionStarted(sessionId);
     sessionStore.setWorkflowMeta(sessionId, {
       detail: "任务已开始，准备执行统一模块流水线",
@@ -274,5 +277,6 @@ const runSession = (sessionId: string, controller: AbortController) =>
       sessionStore.failPipeline(sessionId, message);
     }
   });
+};
 
 export { runSession };
