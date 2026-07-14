@@ -60,6 +60,8 @@ RUN pnpm run build \
   && rm -rf /root/.npm /root/.cache/pnpm /tmp/* \
   && mkdir -p /app/workspace /app/config
 
+ENV NODE_OPTIONS=--max-old-space-size=4096
+
 EXPOSE 4310
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
