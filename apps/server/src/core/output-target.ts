@@ -2,18 +2,19 @@ import path from "node:path";
 
 import { toAbsolutePath } from "./paths.js";
 
-type OutputFormat = "html" | "vue" | "react";
+type OutputFormat = "html" | "vue" | "react" | "flutter";
 
 type SessionOutputTarget = {
   compareEntryPath: string;
   format: OutputFormat;
   frameworkBuildDir?: string;
+  frameworkProjectDir?: string;
   renderEntryPath: string;
   sourceEntryPath: string;
   sourceStylePath?: string;
 };
 
-const OUTPUT_FORMATS: OutputFormat[] = ["html", "vue", "react"];
+const OUTPUT_FORMATS: OutputFormat[] = ["html", "vue", "react", "flutter"];
 
 const isOutputFormat = (value: unknown): value is OutputFormat =>
   typeof value === "string" &&
@@ -22,13 +23,14 @@ const isOutputFormat = (value: unknown): value is OutputFormat =>
 const parseOutputFormat = (value: unknown): OutputFormat => {
   if (isOutputFormat(value)) return value.trim().toLowerCase() as OutputFormat;
   throw new Error(
-    `Invalid outputFormat: ${String(value ?? "")} (expected html, vue, or react)`,
+    `Invalid outputFormat: ${String(value ?? "")} (expected html, vue, react, or flutter)`,
   );
 };
 
 const getOutputFormatLabel = (format: OutputFormat) => {
   if (format === "vue") return "Vue";
   if (format === "react") return "React";
+  if (format === "flutter") return "Flutter";
   return "HTML";
 };
 
@@ -45,7 +47,20 @@ const assertOutputFormat = (value: unknown): OutputFormat => {
 const getSourceFragmentFileName = (outputFormat: OutputFormat) => {
   if (outputFormat === "vue") return "source.fragment.vue.html";
   if (outputFormat === "react") return "source.fragment.jsx";
+  if (outputFormat === "flutter") return "source.fragment.dart";
   return "preview.fragment.html";
+};
+
+const resolveFlutterProjectDir = (outputTarget: SessionOutputTarget) => {
+  if (outputTarget.format !== "flutter") {
+    throw new Error(
+      `Cannot resolve a Flutter project directory for ${outputTarget.format} output`,
+    );
+  }
+  return (
+    outputTarget.frameworkProjectDir ??
+    path.dirname(path.dirname(outputTarget.sourceEntryPath))
+  );
 };
 
 const resolveOutputTarget = ({
@@ -83,6 +98,18 @@ const resolveOutputTarget = ({
     };
   }
 
+  if (format === "flutter") {
+    const frameworkProjectDir = toAbsolutePath(`${basePath}.flutter`);
+    return {
+      compareEntryPath,
+      format,
+      frameworkBuildDir: path.join(artifactDir, "framework-render", "flutter"),
+      frameworkProjectDir,
+      renderEntryPath,
+      sourceEntryPath: path.join(frameworkProjectDir, "lib", "main.dart"),
+    };
+  }
+
   return {
     compareEntryPath,
     format,
@@ -98,6 +125,7 @@ export {
   isOutputFormat,
   normalizeOutputFormat,
   parseOutputFormat,
+  resolveFlutterProjectDir,
   resolveOutputTarget,
 };
 export type { OutputFormat, SessionOutputTarget };

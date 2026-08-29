@@ -70,7 +70,8 @@ const truncateReasoningForEvent = (text: string) =>
   truncate(
     text,
     MAX_REASONING_EVENT_CHARS,
-    (value) => `\n[reasoning truncated for session event: ${value.length} chars total]`,
+    (value) =>
+      `\n[reasoning truncated for session event: ${value.length} chars total]`,
   );
 
 const appendTailSample = (
@@ -83,7 +84,8 @@ const appendTailSample = (
 };
 
 const killChildProcessGroup = (child: ChildProcess, signal: NodeJS.Signals) => {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  if (!child.pid || child.exitCode !== null || child.signalCode !== null)
+    return;
   try {
     if (process.platform !== "win32") {
       process.kill(-child.pid, signal);
@@ -319,9 +321,14 @@ const createOpencodeConfigFile = async ({
   if (Object.keys(modelConfig.headers).length > 0) {
     providerOptions.headers = modelConfig.headers;
   }
-  const responsesReasoningOptions =
+  const responsesModelOptions =
     modelConfig.wireApi === "responses"
-      ? getResponsesReasoningOptions(options.modelReasoningEffort)
+      ? {
+          ...getResponsesReasoningOptions(options.modelReasoningEffort),
+          ...(modelConfig.serviceTier
+            ? { serviceTier: modelConfig.serviceTier }
+            : {}),
+        }
       : undefined;
 
   await writeFile(
@@ -341,9 +348,9 @@ const createOpencodeConfigFile = async ({
             models: {
               [modelRef.modelName]: {
                 name: modelRef.modelName,
-                ...(responsesReasoningOptions
+                ...(responsesModelOptions
                   ? {
-                      options: responsesReasoningOptions,
+                      options: responsesModelOptions,
                       variants: getResponsesReasoningVariants(),
                     }
                   : {}),
@@ -358,8 +365,7 @@ const createOpencodeConfigFile = async ({
                 ...(modelConfig.maxOutputTokens
                   ? {
                       limit: {
-                        context:
-                          modelConfig.contextWindow ?? 256000,
+                        context: modelConfig.contextWindow ?? 256000,
                         output: modelConfig.maxOutputTokens,
                       },
                     }

@@ -1,6 +1,6 @@
 type FetchLike = typeof fetch;
 
-type CoreOutputFormat = "html" | "vue" | "react";
+type CoreOutputFormat = "html" | "vue" | "react" | "flutter";
 
 type CoreJobStatus =
   | "draft"
@@ -125,7 +125,7 @@ type CoreClientOptions = {
   fetch?: FetchLike;
 };
 
-type CoreUploadFile = Blob | File | Buffer | Uint8Array | ArrayBuffer;
+type CoreUploadFile = Blob | File | Uint8Array | ArrayBuffer;
 
 type CoreUploadInput = {
   file: CoreUploadFile;

@@ -132,6 +132,7 @@ const collectAgentLocalValidation = async ({
                 sessionId,
                 `[module-pipeline-v2:${module.id}] framework verify: ${message}`,
               ),
+            outputFormat,
             round: 1,
             signal: controller.signal,
           });

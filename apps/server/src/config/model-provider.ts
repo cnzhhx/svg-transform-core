@@ -29,6 +29,7 @@ type ModelDefinition = Partial<{
   providerName: string;
   reasoningEffort: AgentReasoningEffort;
   runtime: ModelRuntime;
+  serviceTier: string;
   thinking: boolean;
   wireApi: ModelWireApi;
 }>;
@@ -56,6 +57,7 @@ type ModelProviderConfig = {
   runtime: ModelRuntime;
   runtimeTrace: boolean;
   runtimeTraceSampleChars: number;
+  serviceTier?: string;
   thinking: boolean;
   wireApi: ModelWireApi;
 };
@@ -72,7 +74,8 @@ const ROLE_ENV_PREFIX: Record<ModelConfigRole, string> = {
   vision: "VISION",
 };
 
-const getModelProviderConfigPath = () => getBackendConfig().modelProvider.configPath;
+const getModelProviderConfigPath = () =>
+  getBackendConfig().modelProvider.configPath;
 
 const trimToUndefined = (value: string | undefined) => {
   const trimmed = value?.trim();
@@ -117,6 +120,16 @@ const parseModelWireApi = (
   }
   throw new Error(
     `Invalid model wireApi "${candidate}". Expected: ${MODEL_WIRE_APIS.join(", ")}.`,
+  );
+};
+
+const parseServiceTier = (value: string | undefined) => {
+  const candidate = trimToUndefined(value)?.toLowerCase();
+  if (!candidate) return undefined;
+  if (candidate === "fast") return "priority";
+  if (["default", "flex", "priority"].includes(candidate)) return candidate;
+  throw new Error(
+    `Invalid model serviceTier "${candidate}". Expected: default, fast, flex, priority.`,
   );
 };
 
@@ -290,8 +303,7 @@ const resolveModelProviderConfig = ({
   );
 
   const resolvedContextWindow = parseNonNegativeNumber(
-    readRoleAwareEnv(role, "MODEL_CONTEXT_WINDOW") ??
-      modelConfig.contextWindow,
+    readRoleAwareEnv(role, "MODEL_CONTEXT_WINDOW") ?? modelConfig.contextWindow,
     0,
   );
 
@@ -350,6 +362,10 @@ const resolveModelProviderConfig = ({
       readRoleAwareEnv(role, "MODEL_RUNTIME_TRACE_SAMPLE_CHARS"),
       100,
     ),
+    serviceTier: parseServiceTier(
+      readRoleAwareEnv(role, "MODEL_SERVICE_TIER") ??
+        trimToUndefined(modelConfig.serviceTier),
+    ),
     thinking:
       parseBoolean(readRoleAwareEnv(role, "MODEL_THINKING")) ??
       (typeof modelConfig.thinking === "boolean"
@@ -393,7 +409,4 @@ const resolveModelNameForRequest = (requestedModel?: string) => {
 };
 
 export { resolveModelConfigForRole, resolveModelNameForRequest };
-export type {
-  ModelConfigRole,
-  ModelProviderConfig,
-};
+export type { ModelConfigRole, ModelProviderConfig };

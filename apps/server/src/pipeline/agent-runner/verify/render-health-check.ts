@@ -5,14 +5,12 @@ import { toUrlPath } from "../../../core/paths.js";
 import { startStaticServer } from "../../../core/static-server.js";
 
 /**
- * Post-merge render health check for framework (vue/react) output.
+ * Post-merge render health check for framework (Vue/React/Flutter) output.
  *
- * After the final page verify, the rendered HTML for vue/react is produced by
- * inlining a real Vite-built JS bundle into `#app` / `#root`. If the bundle
- * compiles but throws at runtime (the classic symptom of an undeclared
- * `sourceData` / `data` reference), the mount point stays empty, the page is
- * effectively blank, and pixel diff alone doesn't surface *why*. The page
- * verify diff is high but the session was still being marked `completed`.
+ * After the final page verify, the rendered HTML is produced by a Vite bundle
+ * mounted into `#app` / `#root`, or by Flutter Web mounted into `flutter-view`.
+ * If framework startup throws, the page is effectively blank and pixel diff
+ * alone does not surface why.
  *
  * This check loads the same render-output wrapper the verify step uses, waits
  * for the framework bundle to mount, and inspects the mount point. A blank
@@ -27,8 +25,20 @@ type RenderHealthCheckResult = {
 };
 
 const MOUNT_INSPECT_SCRIPT = `\
-(async () => {
+  (async () => {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const findFlutterSurface = (doc) => {
+    const flutterView = doc.querySelector('flutter-view, flt-glass-pane');
+    if (!flutterView) return null;
+    const glassPane = flutterView.matches('flt-glass-pane')
+      ? flutterView
+      : flutterView.querySelector('flt-glass-pane');
+    return (
+      flutterView.querySelector('canvas, flt-scene, flt-picture') ||
+      (flutterView.shadowRoot && flutterView.shadowRoot.querySelector('canvas, flt-scene-host, flt-scene, flt-picture')) ||
+      (glassPane && glassPane.shadowRoot && glassPane.shadowRoot.querySelector('canvas, flt-scene-host, flt-scene, flt-picture'))
+    );
+  };
   const startedAt = Date.now();
   while (Date.now() - startedAt < 5000) {
     const iframe = document.getElementById('source');
@@ -39,6 +49,8 @@ const MOUNT_INSPECT_SCRIPT = `\
     }
     const app = doc.getElementById('app');
     const root = doc.getElementById('root');
+    const flutterSurface = findFlutterSurface(doc);
+    if (flutterSurface) return { ok: true, renderer: 'flutter-web' };
     const mount = app || root;
     if (!mount) {
       await sleep(100);
@@ -64,9 +76,11 @@ const MOUNT_INSPECT_SCRIPT = `\
   if (!doc) return { ok: false, reason: 'render iframe document unavailable' };
   const app = doc.getElementById('app');
   const root = doc.getElementById('root');
+  const flutterSurface = findFlutterSurface(doc);
+  if (flutterSurface) return { ok: true, renderer: 'flutter-web' };
   const mount = app || root;
   if (!mount) {
-    return { ok: false, reason: 'mount element (#app/#root) missing from rendered document' };
+    return { ok: false, reason: 'framework mount (#app/#root/flutter-view) missing from rendered document' };
   }
   // Mount exists but is empty: the framework bundle either failed to mount
   // or threw before rendering. Capture any onerror the wrapper recorded.

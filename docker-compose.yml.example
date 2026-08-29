@@ -3,7 +3,7 @@ services:
     build: .
     image: svg-transform-core:local
     ports:
-      - "4310:4310"
+      - "127.0.0.1:4310:4310"
     environment:
       PORT: "4310"
       WORKSPACE: /app/workspace

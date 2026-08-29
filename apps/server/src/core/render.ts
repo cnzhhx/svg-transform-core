@@ -204,6 +204,37 @@ const createHtmlWrapper = ({
         return errors
       }
 
+      const findFlutterSurface = (root) => {
+        const flutterView = root.querySelector('flutter-view, flt-glass-pane')
+        if (!flutterView) return null
+        const glassPane = flutterView.matches('flt-glass-pane')
+          ? flutterView
+          : flutterView.querySelector('flt-glass-pane')
+        return (
+          flutterView.querySelector('canvas, flt-scene, flt-picture') ||
+          (flutterView.shadowRoot && flutterView.shadowRoot.querySelector('canvas, flt-scene-host, flt-scene, flt-picture')) ||
+          (glassPane && glassPane.shadowRoot && glassPane.shadowRoot.querySelector('canvas, flt-scene-host, flt-scene, flt-picture'))
+        )
+      }
+
+      const waitForFrameworkMount = async (root) => {
+        const app = root.getElementById('app')
+        const reactRoot = root.getElementById('root')
+        const hasFlutterBootstrap = Boolean(
+          root.querySelector('script[src*="flutter_bootstrap.js"]'),
+        )
+        if (!app && !reactRoot && !hasFlutterBootstrap) return
+
+        const startedAt = Date.now()
+        while (Date.now() - startedAt < 5000) {
+          if (findFlutterSurface(root)) return
+          const mount = app || reactRoot
+          if (mount && mount.childElementCount > 0) return
+          if (window.__RENDER_RUNTIME_ERRORS__.length > 0) return
+          await new Promise((resolve) => setTimeout(resolve, 100))
+        }
+      }
+
       const source = document.getElementById('source')
       // Capture runtime errors thrown inside the iframe render entry (e.g.
       // an undeclared sourceData/data reference in a framework bundle that
@@ -234,6 +265,7 @@ const createHtmlWrapper = ({
             await source.contentWindow.document.fonts.ready
           } catch {}
         }
+        await waitForFrameworkMount(sourceDocument)
         await new Promise((resolve) => setTimeout(resolve, 300))
         window.__RENDER_READY__ = true
       })

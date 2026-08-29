@@ -1,16 +1,23 @@
 {
   "name": "@svg-transform/server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit && node scripts/build-mcp.mjs",
-    "build:mcp": "node scripts/build-mcp.mjs",
+    "build": "pnpm run clean && pnpm run typecheck && tsc -p tsconfig.build.json && node scripts/build-mcp.mjs",
+    "build:mcp": "pnpm run build",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { force: true, recursive: true })\"",
     "dev": "NODE_ENV=development tsx src/server.ts",
-    "lint:types": "tsc --noEmit",
-    "start": "NODE_ENV=production tsx src/server.ts",
-    "test": "tsx --test tests/unit/**/*.test.ts"
+    "lint:types": "pnpm run typecheck",
+    "start": "NODE_ENV=production node dist/server.js",
+    "test": "tsx --test tests/unit/**/*.test.ts",
+    "test:coverage": "tsx --test --experimental-test-coverage tests/unit/**/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=22.16.0 <23",
+    "pnpm": ">=10.11.0 <11"
   },
   "dependencies": {
     "@vitejs/plugin-react": "6.0.2",
@@ -18,10 +25,11 @@
     "archiver": "7.0.1",
     "express": "5.2.1",
     "multer": "1.4.5-lts.2",
-    "nanoid": "5.1.11",
+    "nanoid": "5.1.16",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "vite": "8.0.16",
+    "tsx": "4.22.4",
+    "vite": "8.2.2",
     "vue": "3.5.38",
     "ws": "8.21.0"
   },
@@ -30,9 +38,8 @@
     "@types/express": "5.0.6",
     "@types/express-serve-static-core": "5.1.1",
     "@types/multer": "1.4.13",
-    "@types/node": "25.9.3",
+    "@types/node": "22.20.1",
     "playwright": "1.61.1",
-    "tsx": "4.22.4",
     "typescript": "5.9.3"
   }
 }

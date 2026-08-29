@@ -28,8 +28,6 @@ const job = await client.createJob(
   { model: "main", outputFormat: "html", scale: 1 },
 );
 
-await client.startJob(job.jobId);
-
 let current = await client.getJob(job.jobId);
 while (!["completed", "best-effort", "failed", "failed-gate"].includes(current.status)) {
   await new Promise((resolve) => setTimeout(resolve, 2000));
@@ -77,8 +75,11 @@ await client.sendJobMessage(
 - `jobFileUrl(jobId, path)`
 - `deleteJob(jobId)`
 
-Supported `outputFormat` values are `html`, `vue`, and `react`.
+Supported `outputFormat` values are `html`, `vue`, `react`, and `flutter`.
+
+Jobs are queued automatically unless they are created with `dryRun: true`.
+Call `startJob(jobId)` to start a draft job created in dry-run mode.
 
 ## Runtime Requirements
 
-Use Node.js 20+ or another runtime with `fetch`, `Blob`, and `FormData`.
+Use Node.js 20.19+ or another runtime with `fetch`, `Blob`, and `FormData`.

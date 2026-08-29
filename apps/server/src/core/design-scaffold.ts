@@ -2,9 +2,10 @@ import { stat } from 'node:fs/promises'
 import path from 'node:path'
 
 import type { OutputFormat, SessionOutputTarget } from './output-target.js'
-import { resolveOutputTarget } from './output-target.js'
+import { resolveFlutterProjectDir, resolveOutputTarget } from './output-target.js'
 import { resolveSvgDesign } from './design-resolve.js';
 import { writeTextFile } from './file-io.js';
+import { writeFlutterProjectFiles } from './flutter-build.js';
 
 const createRenderScaffold = ({
   designName,
@@ -248,6 +249,42 @@ body {
 }
 `
 
+const createFlutterSourceScaffold = ({
+  height,
+  width,
+}: {
+  height: number
+  width: number
+}) => `\
+import 'package:flutter/material.dart';
+
+void main() {
+  runApp(const DesignApp());
+}
+
+class DesignApp extends StatelessWidget {
+  const DesignApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const MaterialApp(
+      debugShowCheckedModeBanner: false,
+      home: Material(
+        color: Colors.transparent,
+        child: Align(
+          alignment: Alignment.topLeft,
+          child: SizedBox(
+            width: ${width},
+            height: ${height},
+            child: Stack(clipBehavior: Clip.hardEdge, children: []),
+          ),
+        ),
+      ),
+    );
+  }
+}
+`
+
 const writeIfMissing = async ({
   content,
   overwrite,
@@ -315,6 +352,16 @@ const initializeSourceScaffold = async ({
       content: createVueSourceScaffold({ height, width }),
       overwrite,
       path: outputTarget.sourceEntryPath,
+    })
+    return
+  }
+
+  if (format === 'flutter') {
+    await writeFlutterProjectFiles({
+      designName,
+      mainDart: createFlutterSourceScaffold({ height, width }),
+      overwrite,
+      projectDir: resolveFlutterProjectDir(outputTarget),
     })
     return
   }

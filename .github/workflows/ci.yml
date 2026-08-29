@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: Typecheck, test, build, and pack
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run repository checks
+        run: pnpm check
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level high
+
+      - name: Check whitespace
+        run: git diff --check
+
+  client-node-20:
+    name: Client compatibility (Node 20)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20.19.0
+          cache: pnpm
+
+      - name: Install client dependencies
+        run: pnpm --filter @svg-transform/core-client... install --frozen-lockfile
+
+      - name: Test client package
+        run: pnpm -C packages/client run typecheck && pnpm -C packages/client test
+
+  docker:
+    name: Build and smoke-test image
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          load: true
+          tags: svg-transform-core:ci
+          build-args: |
+            DEBIAN_MIRROR=http://deb.debian.org/debian
+            DEBIAN_SECURITY_MIRROR=http://security.debian.org/debian-security
+            NPM_REGISTRY=https://registry.npmjs.org
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke-test container
+        shell: bash
+        run: |
+          set -euo pipefail
+          smoke_root="$RUNNER_TEMP/svg-transform-core-smoke"
+          mkdir -p "$smoke_root/workspace"
+          cp apps/server/config/model-provider.example.json "$smoke_root/model-provider.json"
+          docker run --detach \
+            --name svg-transform-core-ci \
+            --publish 127.0.0.1:4319:4310 \
+            --volume "$smoke_root/workspace:/app/workspace" \
+            --volume "$smoke_root/model-provider.json:/app/config/model-provider.json:ro" \
+            svg-transform-core:ci
+          cleanup() {
+            docker logs svg-transform-core-ci || true
+            docker rm --force svg-transform-core-ci >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          for _ in $(seq 1 30); do
+            if curl --max-time 2 --fail --silent http://127.0.0.1:4319/health | grep --quiet '^ok$'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1

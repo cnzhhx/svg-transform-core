@@ -35,6 +35,7 @@ const sanitizeOutputTarget = (
     compareEntryPath,
     format: outputFormat,
     frameworkBuildDir: optionalString(value.frameworkBuildDir),
+    frameworkProjectDir: optionalString(value.frameworkProjectDir),
     renderEntryPath,
     sourceEntryPath,
     sourceStylePath: optionalString(value.sourceStylePath),

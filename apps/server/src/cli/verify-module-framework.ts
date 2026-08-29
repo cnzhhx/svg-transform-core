@@ -45,12 +45,16 @@ const parseArgs = (args: string[]) => {
     flags.get("--format") ??
     flags.get("--output-format") ??
     flags.get("--outputFormat");
-  if (formatRaw !== "vue" && formatRaw !== "react") {
+  if (
+    formatRaw !== "vue" &&
+    formatRaw !== "react" &&
+    formatRaw !== "flutter"
+  ) {
     throw new Error(
-      `--format must be "vue" or "react" (got ${String(formatRaw ?? "(missing)")}); this CLI only verifies framework modules`,
+      `--format must be "vue", "react", or "flutter" (got ${String(formatRaw ?? "(missing)")}); this CLI only verifies framework modules`,
     );
   }
-  const outputFormat: "vue" | "react" = formatRaw;
+  const outputFormat: "vue" | "react" | "flutter" = formatRaw;
   return {
     moduleDir: flags.get("--module-dir") ?? flags.get("--moduleDir") ?? ".",
     moduleId: flags.get("--module-id") ?? flags.get("--moduleId"),
@@ -95,15 +99,15 @@ const measureModuleAlignmentSafely = (
     }));
 
 /**
- * Framework module verify CLI. Builds a real Vite project (Vue/React) from the
- * module's source fragment + source-data + module.css, renders it, and reports
+ * Framework module verify CLI. Builds a real Vite or Flutter Web project from
+ * the module's source fragment and related files, renders it, and reports
  * a pixel diffRatio against the module SVG. Intended for agent in-turn use on
- * vue/react sessions so the agent sees whether its framework code actually
- * compiles and renders — unlike `verify-module-design.ts` which only renders
+ * Vue/React/Flutter sessions so the agent sees whether its framework code
+ * actually compiles and renders, unlike `verify-module-design.ts`, which only renders
  * the HTML preview fragment.
  *
  * Emits compact JSON on stdout, including diffRatio/passed and buildError
- * when the Vite build fails, so the agent-turn command classifier can parse
+ * when the framework build fails, so the agent-turn command classifier can parse
  * the result for rollback decisions.
  */
 const main = async () => {

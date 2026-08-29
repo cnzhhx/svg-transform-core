@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from "node:fs";
 
 import archiver from "archiver";
 import { Router } from "express";
+import type { Request, Response } from "express";
 import multer from "multer";
 import { nanoid } from "nanoid";
 
@@ -295,6 +296,40 @@ const resolveJobFilePath = (job: Session, rawPath: string) => {
   return filePath;
 };
 
+const sendJobFile = ({
+  notFoundMessage,
+  pathPrefix = "",
+}: {
+  notFoundMessage: string;
+  pathPrefix?: string;
+}) => (req: Request, res: Response) => {
+  const job = sessionStore.get(String(req.params["id"] ?? ""));
+  if (!job) {
+    res.status(404).json({ error: "Job not found" });
+    return;
+  }
+  try {
+    const pathParam = req.params["path"];
+    const rawPath = Array.isArray(pathParam)
+      ? pathParam.join("/")
+      : String(pathParam ?? "");
+    const filePath = resolveJobFilePath(
+      job,
+      pathPrefix ? path.join(pathPrefix, rawPath) : rawPath,
+    );
+    if (!existsSync(filePath)) {
+      res.status(404).json({ error: notFoundMessage });
+      return;
+    }
+    res.sendFile(filePath);
+  } catch (caughtError) {
+    const message = caughtError instanceof Error
+      ? caughtError.message
+      : String(caughtError);
+    res.status(400).json({ error: message });
+  }
+};
+
 router.get("/jobs/:id/preview", (req, res) => {
   const job = sessionStore.get(String(req.params["id"] ?? ""));
   if (!job) {
@@ -309,30 +344,15 @@ router.get("/jobs/:id/preview", (req, res) => {
   res.sendFile(previewPath);
 });
 
-router.get("/jobs/:id/files/*path", (req, res) => {
-  const job = sessionStore.get(String(req.params["id"] ?? ""));
-  if (!job) {
-    res.status(404).json({ error: "Job not found" });
-    return;
-  }
-  try {
-    const pathParam = req.params["path"];
-    const rawPath = Array.isArray(pathParam)
-      ? pathParam.join("/")
-      : String(pathParam ?? "");
-    const filePath = resolveJobFilePath(job, rawPath);
-    if (!existsSync(filePath)) {
-      res.status(404).json({ error: "File not found" });
-      return;
-    }
-    res.sendFile(filePath);
-  } catch (caughtError) {
-    const message = caughtError instanceof Error
-      ? caughtError.message
-      : String(caughtError);
-    res.status(400).json({ error: message });
-  }
-});
+router.get(
+  "/jobs/:id/artifacts/*path",
+  sendJobFile({ notFoundMessage: "Artifact not found", pathPrefix: "artifacts" }),
+);
+
+router.get(
+  "/jobs/:id/files/*path",
+  sendJobFile({ notFoundMessage: "File not found" }),
+);
 
 router.get("/jobs/:id/download", async (req, res) => {
   const job = sessionStore.get(String(req.params["id"] ?? ""));

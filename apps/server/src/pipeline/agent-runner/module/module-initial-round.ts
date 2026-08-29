@@ -433,7 +433,9 @@ const runInitialModuleRound = async ({
                     moduleDir,
                     outputFormat,
                   ),
-                  sourceData: path.join(moduleDir, "source-data.json"),
+                  ...(outputFormat === "flutter"
+                    ? {}
+                    : { sourceData: path.join(moduleDir, "source-data.json") }),
                 }),
           },
           outputTokens: failedUsage?.output_tokens ?? 0,

@@ -231,7 +231,10 @@ const readModuleOutputFingerprint = async ({
     statSignature(manifestPath),
     ...(outputFormat === "html"
       ? []
-      : [statSignature(sourceFragmentPath), statSignature(sourceDataPath)]),
+      : [
+          statSignature(sourceFragmentPath),
+          ...(outputFormat === "flutter" ? [] : [statSignature(sourceDataPath)]),
+        ]),
     listFileSignatures(path.join(workingDir, "assets")),
   ]);
   return signatures.flat().join("|");
@@ -298,7 +301,9 @@ const buildInitialSourceFragmentTemplate = (
 ) =>
   outputFormat === "react"
     ? `<div className="${module.id}" data-module-id="${module.id}"></div>\n`
-    : buildInitialPreviewTemplate(module);
+    : outputFormat === "flutter"
+      ? `const SizedBox.expand()\n`
+      : buildInitialPreviewTemplate(module);
 
 const buildInitialCssTemplate = (module: SvgVerticalModule) =>
   `.${module.id} {\n  position: relative;\n  width: ${Math.round(module.region.width)}px;\n  height: ${Math.round(module.region.height)}px;\n  overflow: hidden;\n}\n`;
@@ -875,7 +880,9 @@ export async function runAgentUnit(
         moduleCss: moduleCssPath,
         moduleSvg: moduleSvgPath,
         previewFragmentHtml: previewFragmentHtmlPath,
-        ...(outputFormat === "html" ? {} : { sourceData: sourceDataPath }),
+        ...(outputFormat === "vue" || outputFormat === "react"
+          ? { sourceData: sourceDataPath }
+          : {}),
         ...(outputFormat === "html"
           ? {}
           : { sourceFragment: sourceFragmentPath }),
@@ -973,7 +980,7 @@ export async function runAgentUnit(
     outputFormat === "html"
       ? readFile(previewFragmentHtmlPath, "utf8")
       : readFile(sourceFragmentPath, "utf8"),
-    outputFormat === "html"
+    outputFormat === "html" || outputFormat === "flutter"
       ? Promise.resolve(undefined)
       : readFile(sourceDataPath, "utf8").catch(() => undefined),
     readFile(manifestPath, "utf8"),
@@ -990,7 +997,7 @@ export async function runAgentUnit(
     outputFormat === "html"
       ? Promise.resolve(undefined)
       : readFileSize(sourceFragmentPath),
-    outputFormat === "html"
+    outputFormat === "html" || outputFormat === "flutter"
       ? Promise.resolve(undefined)
       : readFileSize(sourceDataPath).catch(() => undefined),
     readFileSize(manifestPath),
@@ -1060,7 +1067,9 @@ export async function runAgentUnit(
       moduleCss: moduleCssPath,
       moduleSvg: moduleSvgPath,
       previewFragmentHtml: previewFragmentHtmlPath,
-      ...(outputFormat === "html" ? {} : { sourceData: sourceDataPath }),
+      ...(outputFormat === "vue" || outputFormat === "react"
+        ? { sourceData: sourceDataPath }
+        : {}),
       ...(outputFormat === "html"
         ? {}
         : { sourceFragment: sourceFragmentPath }),

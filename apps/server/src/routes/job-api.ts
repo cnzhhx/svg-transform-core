@@ -72,6 +72,9 @@ const publicResultForJob = (
         compareEntryPath: relativePath(result.outputTarget.compareEntryPath),
         format: result.outputTarget.format,
         frameworkBuildDir: relativePath(result.outputTarget.frameworkBuildDir),
+        frameworkProjectDir: relativePath(
+          result.outputTarget.frameworkProjectDir,
+        ),
         renderEntryPath: relativePath(result.outputTarget.renderEntryPath),
         sourceEntryPath: relativePath(result.outputTarget.sourceEntryPath),
         sourceStylePath: relativePath(result.outputTarget.sourceStylePath),

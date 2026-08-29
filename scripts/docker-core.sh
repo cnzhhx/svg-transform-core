@@ -5,6 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTAINER_NAME="${SVG_TRANSFORM_CORE_CONTAINER:-svg-transform-core}"
 IMAGE_NAME="${SVG_TRANSFORM_CORE_IMAGE:-svg-transform-core:local}"
 PORT="${PORT:-4310}"
+BIND_ADDRESS="${SVG_TRANSFORM_CORE_BIND_ADDRESS:-127.0.0.1}"
 WORKSPACE_DIR="${SVG_TRANSFORM_CORE_WORKSPACE:-$ROOT_DIR/workspace}"
 MODEL_CONFIG="${SVG_TRANSFORM_CORE_MODEL_CONFIG:-$ROOT_DIR/.runtime/model-provider.json}"
 ENV_FILE="${SVG_TRANSFORM_CORE_ENV_FILE:-}"
@@ -55,17 +56,19 @@ run_container() {
   if [ -n "$ENV_FILE" ]; then
     docker run -d \
       --name "$CONTAINER_NAME" \
-      -p "$PORT:4310" \
+      -p "$BIND_ADDRESS:$PORT:4310" \
       -v "$WORKSPACE_DIR:/app/workspace" \
       -v "$MODEL_CONFIG:/app/config/model-provider.json:ro" \
       --env-file "$ENV_FILE" \
+      -e PORT=4310 \
       "$IMAGE_NAME"
   else
     docker run -d \
       --name "$CONTAINER_NAME" \
-      -p "$PORT:4310" \
+      -p "$BIND_ADDRESS:$PORT:4310" \
       -v "$WORKSPACE_DIR:/app/workspace" \
       -v "$MODEL_CONFIG:/app/config/model-provider.json:ro" \
+      -e PORT=4310 \
       "$IMAGE_NAME"
   fi
 }
@@ -150,6 +153,7 @@ Environment:
   PORT                              Host port, default 4310
   SVG_TRANSFORM_CORE_CONTAINER       Container name, default svg-transform-core
   SVG_TRANSFORM_CORE_IMAGE           Image name, default svg-transform-core:local
+  SVG_TRANSFORM_CORE_BIND_ADDRESS    Host bind address, default 127.0.0.1
   SVG_TRANSFORM_CORE_WORKSPACE       Host workspace dir, default ./workspace
   SVG_TRANSFORM_CORE_MODEL_CONFIG    Host model config, default ./.runtime/model-provider.json
   SVG_TRANSFORM_CORE_ENV_FILE        Optional env file passed to docker run

@@ -1,4 +1,3 @@
-import path from 'node:path'
 import os from 'node:os'
 import { mkdir } from 'node:fs/promises'
 

@@ -24,6 +24,7 @@ const MODEL_ENV_NAMES = [
   "MODEL_RUNTIME",
   "MODEL_RUNTIME_TRACE",
   "MODEL_RUNTIME_TRACE_SAMPLE_CHARS",
+  "MODEL_SERVICE_TIER",
   "MODEL_THINKING",
   "MODEL_WIRE_API",
 ];
@@ -117,6 +118,33 @@ describe("model provider config", () => {
         assert.equal(config.id, "first");
         assert.equal(config.provider, "unit-provider-first");
         assert.equal(config.model, "unit-model-first");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }));
+
+  it("normalizes the Codex fast service tier for Responses requests", () =>
+    withCleanModelEnv(() => {
+      const dir = mkdtempSync(path.join(tmpdir(), "svg-transform-model-"));
+      const configPath = path.join(dir, "model-provider.json");
+      try {
+        writeConfig(configPath, {
+          models: {
+            terra: {
+              runtime: "opencode",
+              wireApi: "responses",
+              provider: "unit-provider",
+              baseURL: "https://api.example.test/v1",
+              apiKey: "unit-key",
+              model: "gpt-5.6-terra",
+              serviceTier: "fast",
+            },
+          },
+        });
+        process.env.MODEL_PROVIDER_CONFIG = configPath;
+
+        const config = resolveModelConfigForRole("text");
+        assert.equal(config.serviceTier, "priority");
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
