@@ -34,6 +34,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install test browser
+        working-directory: apps/server
+        run: |
+          pnpm exec playwright install --with-deps chromium
+          node --input-type=module -e 'import { chromium } from "playwright"; console.log(`CHROMIUM_PATH=${chromium.executablePath()}`)' >> "$GITHUB_ENV"
+
       - name: Run repository checks
         run: pnpm check
 
@@ -64,7 +70,10 @@ jobs:
         run: pnpm --filter @svg-transform/core-client... install --frozen-lockfile
 
       - name: Test client package
-        run: pnpm -C packages/client run typecheck && pnpm -C packages/client test
+        run: |
+          pnpm -C packages/client run typecheck
+          pnpm -C packages/client test
+          pnpm check:package:built
 
   docker:
     name: Build and smoke-test image

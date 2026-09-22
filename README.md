@@ -274,7 +274,7 @@ encode those repository tool versions.
 For non-Docker server development:
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 cp apps/server/config/model-provider.example.json apps/server/config/model-provider.json
 pnpm run build
 PORT=4310 pnpm run dev
@@ -286,9 +286,11 @@ Run the complete local quality gate before opening a pull request:
 pnpm check
 ```
 
-This checks release metadata, strict TypeScript settings, all workspace tests,
-production builds, and the npm package file list. See `CONTRIBUTING.md` for the
-individual commands and `docs/configuration.md` for all environment options.
+This checks release metadata, lint, strict TypeScript settings, production
+builds, all workspace tests, and the SDK tarball installed in an isolated
+consumer (including public exports and types). Each package is built once
+during this check. See `CONTRIBUTING.md` for browser setup and individual
+commands, and `docs/configuration.md` for all environment options.
 
 Create a dry-run job without consuming model quota:
 

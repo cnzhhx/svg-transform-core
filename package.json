@@ -6,8 +6,10 @@
   "type": "module",
   "scripts": {
     "build": "pnpm -r run build",
-    "check": "pnpm run check:release && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run check:package",
+    "build:compile": "pnpm -r run build:compile",
+    "check": "pnpm run check:release && pnpm run lint && pnpm run typecheck && pnpm run build:compile && pnpm run test:run && pnpm run check:package:built",
     "check:package": "pnpm -C packages/client run pack:check",
+    "check:package:built": "pnpm -C packages/client run pack:check:built",
     "check:release": "node scripts/check-release.mjs",
     "clean": "pnpm -r --if-present run clean",
     "dev": "pnpm -C apps/server dev",
@@ -21,6 +23,7 @@
     "lint:types": "pnpm run typecheck",
     "start": "pnpm -C apps/server start",
     "test": "pnpm -r --if-present run test",
+    "test:run": "pnpm -r run test:run",
     "typecheck": "pnpm -r run typecheck"
   },
   "engines": {

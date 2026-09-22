@@ -36,6 +36,14 @@ so `tsx` is intentionally a production dependency.
 
 The client build emits JavaScript and declarations to `packages/client/dist`.
 That directory is ignored by Git and rebuilt by the package `prepack` hook.
+Both packages use `noEmitOnError` to prevent emission when compilation fails.
+
+The repository quality gate typechecks first, then runs each package's clean
+`build:compile` step once. `test:run` and `check:package:built` consume that
+output without rebuilding it. The standalone build, test, and package-check
+commands still prepare their own prerequisites. Package verification installs
+the SDK tarball outside the workspace to catch files or exports that work only
+through local workspace resolution.
 
 ## Runtime Data
 
