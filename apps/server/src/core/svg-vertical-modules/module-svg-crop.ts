@@ -1,6 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { createHash } from 'node:crypto'
 import path from 'node:path'
+import { parseSvgLength } from '../svg-parse.js'
 import type { RootChildElement } from '../html-parse.js'
 import {
   findTagEnd,
@@ -24,7 +25,7 @@ type CropModuleSvgOutput = {
   viewBox: string
 }
 
-export const MODULE_SVG_CROP_VERSION = '6'
+export const MODULE_SVG_CROP_VERSION = '7'
 
 type SvgViewport = {
   height: number
@@ -47,13 +48,6 @@ const parseNumberList = (value?: string) =>
     .split(/[\s,]+/)
     .map((part) => Number(part))
     .filter((part) => Number.isFinite(part))
-
-const parseSvgLength = (value?: string) => {
-  const match = (value ?? '').trim().match(/^[+-]?(?:\d+\.?\d*|\.\d+)/)
-  if (!match?.[0]) return null
-  const parsed = Number(match[0])
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : null
-}
 
 const parseSvgViewport = (attrs: string): SvgViewport | null => {
   const viewBoxParts = parseNumberList(readSvgAttribute(attrs, 'viewBox'))
@@ -308,24 +302,47 @@ const hasNegligibleOpacity = (child: RootChildElement) => {
   )
 }
 
-const removeNegligibleOpacityContent = (content: string): string => {
+const removeNegligibleOpacityContent = (content: string, insideText = false): string => {
   const children = parseRootChildElements(content)
   if (!children.length) return content
 
-  return children
-    .flatMap((child): string[] => {
-      if (hasNegligibleOpacity(child)) return []
-      if (child.selfClosing || SVG_RESOURCE_TAGS.has(child.tag)) {
-        return [child.content]
-      }
+  const retained: string[] = []
+  let cursor = 0
+  for (const child of children) {
+    // Mixed SVG text can live before, between and after tspan elements.
+    // Keep those source slices verbatim, including significant whitespace.
+    retained.push(content.slice(cursor, child.startOffset))
+    cursor = child.endOffset
+    if (hasNegligibleOpacity(child)) continue
+    if (child.selfClosing || SVG_RESOURCE_TAGS.has(child.tag)) {
+      retained.push(child.content)
+      continue
+    }
 
-      const innerContent = removeNegligibleOpacityContent(child.innerContent)
-      if (!innerContent.trim() && SVG_EMPTY_CONTAINER_TAGS.has(child.tag)) {
-        return []
-      }
-      return [`${child.openTag}\n${innerContent}\n${child.closeTag}`]
-    })
-    .join('\n')
+    const innerContent = removeNegligibleOpacityContent(
+      child.innerContent,
+      insideText || child.tag === 'text',
+    )
+    if (!insideText && !innerContent.trim() && SVG_EMPTY_CONTAINER_TAGS.has(child.tag)) continue
+    retained.push(child.openTag, innerContent, child.closeTag)
+  }
+  retained.push(content.slice(cursor))
+  return retained.join('')
+}
+
+const readRetainedSvgText = (content: string, insideText = false): string => {
+  const text: string[] = []
+  let cursor = 0
+  for (const child of parseRootChildElements(content)) {
+    if (insideText) text.push(content.slice(cursor, child.startOffset))
+    cursor = child.endOffset
+    if (hasNegligibleOpacity(child) || SVG_RESOURCE_TAGS.has(child.tag)) continue
+    if (!child.selfClosing) {
+      text.push(readRetainedSvgText(child.innerContent, insideText || child.tag === 'text'))
+    }
+  }
+  if (insideText) text.push(content.slice(cursor))
+  return text.join('')
 }
 
 const extractLeadingViewportBackgroundContent = ({
@@ -627,11 +644,13 @@ const parseDefinitionElementsDeep = (content: string) => {
       definitions.push({
         closeTag,
         content: rawElement,
+        endOffset: match.index + rawElement.length,
         innerContent,
         nthOfType,
         openTag,
         pathSegment: `${tag}:nth-of-type(${nthOfType})`,
         selfClosing: false,
+        startOffset: match.index,
         tag,
       })
     }
@@ -776,6 +795,9 @@ export async function cropModuleSvg(
     ? filteredContent.content
     : shellBackgroundContent
   const ownedContent = removeNegligibleOpacityContent(ownedContentBeforePrune)
+  if (readRetainedSvgText(ownedContentBeforePrune) !== readRetainedSvgText(ownedContent)) {
+    throw new Error(`SVG text content changed while pruning module ${module.id}`)
+  }
   const bodyDefinitions = collectReferencedBodyDefinitions({
     content: contentWithoutDefinitions,
     referencedContent: [ownedContent].filter((part) => part.trim()).join('\n'),

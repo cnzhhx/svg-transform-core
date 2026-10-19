@@ -122,7 +122,7 @@ function buildAgentUnitFollowupBasePrompt(input: {
     round,
   } = input;
   const outputFormat = resolveModuleOutputFormat({ design, modulePlan });
-  const isFrameworkOutput = outputFormat === "vue" || outputFormat === "react";
+  const isFrameworkOutput = outputFormat !== "html";
   const moduleSemanticJsonPath = path.join(workingDir, "module-semantic.json");
   const moduleAlignmentDiagnosticsCliPath = path.join(
     process.cwd(),
@@ -203,10 +203,13 @@ function buildAgentUnitPrompt(input: {
       ? ""
       : outputFormat === "vue"
         ? "- source.fragment.vue.html：Vue template body 片段（不含 <template>/<script>/<style> 外壳、不含 import/export/函数声明）。重复/数据驱动结构用 v-for；数据写入 source-data.json，模板里通过 sourceData[\"<本模块id>\"].xxx 引用。\n  **图片路径规则**：静态图片（非 v-for 内）直接用普通 `src=\"./assets/xxx.png\"`，不要用 `:src=\"'./assets/xxx.png'\"`（字符串字面量绑定）。只有在 v-for 循环或需要动态拼接路径时才用 `:src=\"item.imgPath\"`（引用 sourceData 字段）。source-data.json 里的图片路径也统一写 `./assets/xxx.png`（相对模块目录）。"
-        : "- source.fragment.jsx：React JSX 子片段（不含 import/export/函数声明）。重复/数据驱动结构用 .map；数据写入 source-data.json，模板里通过 sourceData[\"<本模块id>\"].xxx 引用。\n  **图片路径规则**：静态图片直接用 `src=\"./assets/xxx.png\"`。动态图片（.map 内）在 source-data.json 中写完整相对路径 `./assets/xxx.png`，JSX 中直接引用 `src={item.imgPath}`，**禁止**用模板字面量拼接路径前缀如 `` src={`./assets/${item.img}`} ``（merge 会重写 sourceData 路径导致双重前缀）。条件表达式中引用文件名同理：把完整路径放入 sourceData 字段，JSX 中直接用字段值。";
+        : outputFormat === "react"
+          ? "- source.fragment.jsx：React JSX 子片段（不含 import/export/函数声明）。重复/数据驱动结构用 .map；数据写入 source-data.json，模板里通过 sourceData[\"<本模块id>\"].xxx 引用。\n  **图片路径规则**：静态图片直接用 `src=\"./assets/xxx.png\"`。动态图片（.map 内）在 source-data.json 中写完整相对路径 `./assets/xxx.png`，JSX 中直接引用 `src={item.imgPath}`，**禁止**用模板字面量拼接路径前缀如 `` src={`./assets/${item.img}`} ``（merge 会重写 sourceData 路径导致双重前缀）。条件表达式中引用文件名同理：把完整路径放入 sourceData 字段，JSX 中直接用字段值。"
+          : `- source.fragment.dart：一个完整的 Flutter Widget 表达式（例如 \`Stack(children: [...])\`），不含 import/export/class/main/函数声明，末尾不写分号。使用 Flutter 原生布局组件表达结构；图片用 \`Image.asset("assets/${module.id}/xxx.png")\`，也可写 \`Image.asset("./assets/xxx.png")\` 由宿主自动改写。不要使用网络图片、HTML、PlatformView 或第三方包 API。`;
   const sourceDataPath = path.join(workingDir, "source-data.json");
-  const isFrameworkOutput = outputFormat === "vue" || outputFormat === "react";
-  const sourceDataContractSection = isFrameworkOutput
+  const isFrameworkOutput = outputFormat !== "html";
+  const usesSourceData = outputFormat === "vue" || outputFormat === "react";
+  const sourceDataContractSection = usesSourceData
     ? `
 ## source-data.json 契约（${outputFormat === "vue" ? "Vue" : "React"}）
 - 宿主会把整个 source-data.json **原样**作为 \`sourceData["${module.id}"]\` 注入（Vue 在 <script setup>，React 在组件函数体），最终形如 \`const sourceData = { "${module.id}": <你的JSON>, ...其它模块 };\`
@@ -214,6 +217,17 @@ function buildAgentUnitPrompt(input: {
 - source fragment 引用本模块数据**必须**写 \`sourceData["${module.id}"].xxx\`，例如 \`v-for="item in sourceData['${module.id}'].items"\`（Vue）或 \`sourceData["${module.id}"].items.map(...)\`（React）。
 - source-data.json 是普通 JSON 对象（任意键），不需要写 bindings 数组或任何特殊结构。
 - 没有 source-data.json 的模块（纯静态布局）可以不写这个文件，宿主会注入 \`const sourceData = {};\` 兜底。
+`
+    : "";
+  const flutterSourceContractSection = outputFormat === "flutter"
+    ? `
+## Flutter source.fragment.dart 契约
+- source.fragment.dart 是模块局部坐标系中的单个 Widget 表达式；宿主会把它放进固定为 ${region.width}x${region.height} 的 SizedBox，并负责整页 Positioned 定位。
+- module.css 只作用于 preview.fragment.html，**不会**转换或注入 Flutter。Dart 片段必须用 Row/Column/Stack/Padding/Align/Container/Text/Image.asset 等 Widget 独立表达同一套布局、颜色、圆角、边框和文字样式，禁止留下 SizedBox 空占位冒充完成。
+- 每个 preview 中的 textBlocks 文本在 Flutter 中必须对应真实 Text Widget；每个 preview 中的 PNG 资产在 Flutter 中必须对应 Image.asset。资产优先写 \`assets/${module.id}/<文件名>\`。
+- 文本保留原文换行；lineRegions 给出原始行距及横向偏移。各行偏移不同时，在同一个文本块内部用原生 Widget 布局这些行，禁止重复输出文案。保留画布外的文本，由模块边界统一裁切。
+- 宿主统一提供 material.dart 和 flutter_svg.dart import；片段内禁止 import、声明 class/函数、调用 main/runApp，也不要引用其它包、网络资源、HTML 或 PlatformView。
+- source.fragment.dart 不使用 source-data.json；重复结构直接在表达式内用 const 列表、List.generate 或 Dart collection-for 表达。
 `
     : "";
   const moduleVerifyCliPath = path.join(
@@ -253,15 +267,15 @@ function buildAgentUnitPrompt(input: {
     : "";
   const dualFragmentSection = isFrameworkOutput
     ? `
-## 双片段对齐（${outputFormat === "vue" ? "Vue" : "React"}）
+## 双片段对齐（${outputFormat === "vue" ? "Vue" : outputFormat === "react" ? "React" : "Flutter"}）
 本模块要同时产出两份视觉等价的产物，二者**必须保持同一画面**（同样的元素、文本、资产、坐标、层级），只是写法不同：
 - **preview.fragment.html**：纯 HTML，把重复结构展开写（如 9 个 cell 全部手写），用于像素级 verify 调优。
-- **source.fragment.${outputFormat === "vue" ? "vue.html" : "jsx"}**：用框架惯用法（v-for / .map + sourceData 绑定）表达同样的语义结构。
-- 写完 source fragment 后**必须**确认：所有在 preview 里出现的可见文本/图片/元素，在 source fragment 里都有对应；sourceData 里能查到引用的数据；不要在 source fragment 里引用 preview 没有的元素，也不要漏掉 preview 里的元素。
+- **${getSourceFragmentFileName(outputFormat)}**：用框架惯用法（${outputFormat === "vue" ? "v-for + sourceData 绑定" : outputFormat === "react" ? ".map + sourceData 绑定" : "Row/Column/Stack/List.generate 等 Widget 组合"}）表达同样的语义结构。
+- 写完 source fragment 后**必须**确认：所有在 preview 里出现的可见文本/图片/元素，在 source fragment 里都有对应；${usesSourceData ? "sourceData 里能查到引用的数据；" : "Flutter 资产路径能对应 assets/ 中的文件；"}不要在 source fragment 里引用 preview 没有的元素，也不要漏掉 preview 里的元素。
 `
     : "";
   return `
-你是设计稿还原专家，精通将设计稿（SVG）精确还原为 HTML/CSS。目标：在视觉忠实的前提下，输出真实可维护的语义 DOM 和稳定 CSS 布局，而不是把设计稿翻译成一张绝对坐标表。
+你是设计稿还原专家，精通将设计稿（SVG）精确还原为 HTML/CSS${outputFormat === "flutter" ? " 和 Flutter Widget" : ""}。目标：在视觉忠实的前提下，输出真实可维护的语义结构和稳定布局，而不是把设计稿翻译成一张绝对坐标表。
 
 ## 模块信息
 - id: ${module.id} | kind: ${module.kind}
@@ -285,6 +299,7 @@ module-semantic.json 关键字段（按此优先级取用）：
 | --- | --- |
 | module.region / scale | 模块尺寸与缩放；所有坐标都相对模块左上角，单位 px |
 | textBlocks[].layoutTargetRegion | 文本的 DOM 容器框，定位文本外盒用它 |
+| textBlocks[].lineCount / lineRegions | 原有行数与每行位置，保留行距和各行的相对横向偏移 |
 | textBlocks[].styleInference | 文本样式（font-size/weight/color/line-height/letter-spacing/font-family），硬约束 |
 | generatedAssets[] | agent 已经按需导出的资产；模块启动时可以为空，不代表缺资源 |
 | generatedAssets[].path | 已导出 PNG 的模块内相对路径 |
@@ -316,13 +331,13 @@ module-semantic.json 关键字段（按此优先级取用）：
 
 ## 方法（按序执行）
 ${methodFirstStep}
-2. **产物优先，先落可运行初版再细调**：读完主输入后，只允许做一次短暂的首批资产决策；需要复杂非文本视觉时先批量/并行导出必要 PNG，然后立刻更新 preview.fragment.html + module.css + manifest.json（Vue/React 还要更新 source fragment）。这些文件若已有最小模板，直接改模板，不要先删除后重建，也不要为 manifest 基础字段停留。不要在写初版前长时间分析、逐节点手绘或反复读图。初版可以粗糙但必须完整可运行：textBlocks 一律 DOM 文本，非文本复杂视觉优先用已导出资产按 generatedAssets[].box 绝对定位，manifest 只填固定字段；后续脚本会补资产列表。有冲突时先选一个保守方案落盘，之后用 **browser-eval** 和 verify 修。
+2. **产物优先，先落可运行初版再细调**：读完主输入后，只允许做一次短暂的首批资产决策；需要复杂非文本视觉时先批量/并行导出必要 PNG，然后立刻更新 preview.fragment.html + module.css + manifest.json（框架输出还要更新 source fragment）。这些文件若已有最小模板，直接改模板，不要先删除后重建，也不要为 manifest 基础字段停留。不要在写初版前长时间分析、逐节点手绘或反复读图。初版可以粗糙但必须完整可运行：textBlocks 一律 DOM 文本，非文本复杂视觉优先用已导出资产按 generatedAssets[].box 绝对定位，manifest 只填固定字段；后续脚本会补资产列表。有冲突时先选一个保守方案落盘，之后用 **browser-eval** 和 verify 修。
 3. **判断区域类型，选布局范式**：
-   - **结构化内容区**（有清晰阅读顺序、行列关系、对齐关系、重复节奏或成组槽位的区域）→ **语义结构 + flex/grid 为默认**。使用 \`header\`/\`main\`/\`section\`/\`nav\`/\`ul\`/\`li\`/\`button\` 等合适标签；用父容器的 \`display:flex\`、\`display:grid\`、\`grid-template-areas\`、\`align-items\`、\`justify-content\`、\`padding\`、\`gap\` 和少量 \`margin\` 表达行列关系。普通文本块、数值组、左右对齐组、媒体+说明组、控件文案不要逐个 absolute。
+   - **结构化内容区**（有清晰阅读顺序、行列关系、对齐关系、重复节奏或成组槽位的区域）→ **语义结构 + flex/grid 为默认**。使用稳定、可维护的容器层级和 class 命名；用父容器的 \`display:flex\`、\`display:grid\`、\`grid-template-areas\`、\`align-items\`、\`justify-content\`、\`padding\`、\`gap\` 和少量 \`margin\` 表达行列关系。普通文本块、数值组、左右对齐组、媒体+说明组、控件文案不要逐个 absolute。
    - **重复/连续/同构区**（成组条目、矩阵、导航集合、控制集合、数据集合）→ 外层父容器用 flex 或 grid 管理宏观排列；每个 item/card/tab/row 内部继续优先用 flex/grid 表达槽位结构。禁止把同构子项拆成一堆互不关联的绝对定位叶子节点，也禁止逐个子项凭感觉微调。同构子项内部保持一致结构：媒体、文本、数值、状态、操作等用稳定 class 命名；只允许通过数据内容、状态、少量修饰 class 表达差异。
    - **自由叠放/复杂视觉区**（无稳定阅读流、多层覆盖、异形图形、复杂资产叠加）→ 允许局部使用 absolute positioning。非文本视觉尽量导出为 PNG 后在该局部叠层容器内绝对定位；**图层若对应一个已导出资产，用该资产 generatedAssets[].box 的 x/y/width/height 定位 + 定尺寸（box 是 PNG 的 CSS 放置外框，别再用节点几何框或内部可见像素框去摆图片，否则会错位/压扁）**；尚未导出的视觉块先用 nodes[].bbox/inspectIndex 判断是否需要导出。z-index 按 inspectIndex 从小到大叠；不合并/丢弃图层、不挑某节点拉伸当整块背景；压在图形上的独立文字仍按 DOM 文本还原到对应位置。
    - **absolute 使用自检**：如果一个区域的视觉关系可以描述为“顺序、对齐、分布、重复、分组、主次层级或槽位关系”，却写成多个 \`position:absolute\` 叶子节点，说明布局范式选错了，必须改成 flex/grid/padding/gap。absolute 可以包住整个局部叠层容器，但不要替代正常内容流。
-4. 文本：用 layoutTargetRegion 定位外盒，再用 styleInference 填样式。textBlocks[].text 是预处理已经合并好的最终 DOM 文案；直接放进一个 DOM 文本元素，保留原文内容，不要改写、拆分或重新识别文本。
+4. 文本：用 layoutTargetRegion 定位外盒，再用 styleInference 填样式。textBlocks[].text 是预处理已经合并好的最终 DOM 文案；每个条目只对应一个 DOM 文本元素，保留原文内容和换行，不要改写或重新识别文本。多行使用原文换行与 white-space: pre；若 lineRegions 中各行 x 不同，在同一个文本元素内用行级 span 保留相对于首行的 x/y 偏移，子行不再单独输出文案或添加 data-node-id。画布外的原文也必须保留，由模块容器按原图裁切。
 5. CSS 落地时坐标/盒模型默认四舍五入到整数 px：图片资产 box、结构节点 bbox、文本 layoutTargetRegion 的 left/top/width/height 都按整数写；textBlocks[].styleInference 的 font-size/line-height/letter-spacing/font-family/weight/color 原样使用，不因取整规则修改。
 6. **选实现手段（默认图片优先，能用 PNG 就不手绘）**：非文本视觉样式默认优先导出 PNG，模块 agent 不需要证明某个复杂视觉“不能用 CSS 实现”才导出。只有纯色背景、单层边框、简单圆角、简单横/竖条、状态点、分隔线这类简单到不能再简单的元素才用 CSS。渐变、纹理、阴影组合、clip-path 异形、mask、图标、多 path 组合、小型标记、装饰外壳、图片内容等都优先导出 PNG。一个视觉由多个节点组成时（多 path 图形、控件背景+边框+高光）用 browser-session_export_svg_node 合并导出为一张；可读 textBlocks 禁止导出。对于 textBlocks 之外的可见前景层，优先按独立视觉层导出，不要并入大块背景/容器资产。
 7. **browser-eval 是首选调试工具，verify 是最终验收工具**。三件套产物可运行后，**立即先用 browser-eval** 做局部自检，优先把内容缺失、错图、明显重叠、明显布局/裁切错误消灭在 verify 之前；在觉得自己"已经做完了"、所有关键元素位置都正确对齐之后，再运行 verify。不要把 verify 当调试工具频繁运行——每轮 verify 成本高，应该只有在 browser-eval 显示布局基本对齐后再进 verify 做最终 diff 检查。
@@ -335,14 +350,15 @@ ${methodFirstStep}
 - ${previewFragmentHtmlPath}（HTML 片段，不含 html/head/body）
 - ${moduleCssPath}（.${module.id} 或 [data-module-id] 作用域）
 - ${path.join(workingDir, "manifest.json")}（只写 moduleId、kind、fragments、styles，**不写资产列表**，资产由脚本扫描 assets/ 自动生成）
-${outputFormat === "html" ? "" : `- ${sourceFragmentPath}（${outputFormat === "vue" ? "template body 片段" : "JSX 子片段"}，禁止 import/export/函数定义）`}
-${outputFormat === "html" ? "" : `- ${sourceDataPath}（有 v-for/map/绑定数据时必写，普通 JSON 对象字面量，详见下方契约）`}
+${outputFormat === "html" ? "" : `- ${sourceFragmentPath}（${outputFormat === "vue" ? "template body 片段" : outputFormat === "react" ? "JSX 子片段" : "Flutter Widget 表达式"}，禁止 import/export/class/main/函数定义）`}
+${usesSourceData ? `- ${sourceDataPath}（有 v-for/map/绑定数据时必写，普通 JSON 对象字面量，详见下方契约）` : ""}
 ${sourceFragmentRequirement ? `${sourceFragmentRequirement}\n` : ""}
 ${sourceDataContractSection}
+${flutterSourceContractSection}
 ## 命令
 - verify: \`pnpm --dir ${process.cwd()} exec tsx ${moduleVerifyCliPath} --module-dir ${workingDir} --module-id ${module.id}${isFrameworkOutput ? ` --format ${outputFormat}` : ""} --scale ${scaleLabel}\`${
     isFrameworkOutput
-      ? `\n  - 这是**框架级 verify**：会用真实 Vite 构建你的 source fragment + source-data + module.css，渲染并和 module SVG 做像素 diff。所以你必须保证 source fragment 能编译、source-data 引用名正确（sourceData["${module.id}"].xxx），否则页面会白屏、diff 极高。`
+      ? `\n  - 这是**框架级 verify**：会用真实${outputFormat === "flutter" ? " Flutter Web" : " Vite"}构建 source fragment${usesSourceData ? " + source-data + module.css" : ""}，渲染并和 module SVG 做像素 diff。所以你必须保证 source fragment 能编译${usesSourceData ? `、source-data 引用名正确（sourceData["${module.id}"].xxx）` : "、Widget 尺寸和资产路径正确"}，否则页面会白屏、diff 极高。`
       : ""
   }
   - verify stdout 会返回 \`artifacts.renderPngPath\`（当前 HTML 渲染）、\`artifacts.svgPngPath\`（原 SVG 参考）和 \`artifacts.diffPngPath\`（不要读）。需要读图时只使用 stdout 返回的具体路径，**禁止自己猜 \`verify/round-*\`，禁止用 find/ls -R 搜索 verify 输出**。
@@ -396,7 +412,7 @@ ${userInstructions}
 
 outputFormat: ${outputFormat}
 
-先阅读当前模块产物（preview.fragment.html、module.css、manifest.json${outputFormat === "html" ? "" : `、${sourceFragmentFileName}、source-data.json`}）和 module-semantic.json。把用户要求转化为源文件修改，保持语义结构完整。
+先阅读当前模块产物（preview.fragment.html、module.css、manifest.json${outputFormat === "html" ? "" : `、${sourceFragmentFileName}${outputFormat === "flutter" ? "" : "、source-data.json"}`}）和 module-semantic.json。把用户要求转化为源文件修改，保持语义结构完整。
 
 ## 视觉实现优先级
 - 禁止先用 CSS 重画复杂视觉再把 PNG 当备选。

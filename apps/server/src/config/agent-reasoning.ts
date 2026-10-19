@@ -14,6 +14,9 @@ const AGENT_REASONING_EFFORTS = {
   get support() {
     return getBackendConfig().reasoning.support
   },
+  get vision() {
+    return getBackendConfig().reasoning.vision
+  },
 } as const
 
 export { AGENT_REASONING_EFFORTS, parseReasoningEffort }

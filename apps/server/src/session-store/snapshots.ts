@@ -35,6 +35,7 @@ const sanitizeOutputTarget = (
     compareEntryPath,
     format: outputFormat,
     frameworkBuildDir: optionalString(value.frameworkBuildDir),
+    frameworkProjectDir: optionalString(value.frameworkProjectDir),
     renderEntryPath,
     sourceEntryPath,
     sourceStylePath: optionalString(value.sourceStylePath),
@@ -42,6 +43,11 @@ const sanitizeOutputTarget = (
 }
 
 const RESULT_KEYS = new Set<keyof SessionResult>([
+  'quality',
+  'deliverable',
+  'recovering',
+  'stageTimings',
+  'modulePlanModules',
   'sourceEntryPath',
   'sourceStylePath',
   'renderEntryPath',
@@ -135,6 +141,7 @@ const TOP_LEVEL_KEYS = new Set<keyof Session>([
   'logs',
   'messages',
   'pendingUserMessages',
+  'inFlightUserMessages',
   'progress',
   'persistence',
   'createdAt',

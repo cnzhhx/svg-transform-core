@@ -43,6 +43,11 @@ import {
 } from "./source-data.js";
 import { formatPx, readRequiredText, resolveConfiguredPath } from "./utils.js";
 import { sanitizeFrameworkSourceEntry } from "./framework-source-sanitize.js";
+import {
+  createFlutterSourceEntry,
+  stageFlutterAssets,
+} from "./flutter-source.js";
+import { writeFlutterProjectFiles } from "../../core/flutter-build.js";
 
 const normalizeOutputFormat = assertOutputFormat;
 
@@ -405,6 +410,33 @@ const mergeSourceEntry = async ({
 
   const sourceDesign = resolveSourceDesign({ design, modulePlan });
   const sourceFormat = outputTarget.format;
+  if (sourceFormat === "flutter") {
+    const { projectDir, stagedSharedLayers } = await stageFlutterAssets({
+      modules,
+      outputTarget,
+      sharedLayers,
+    });
+    const flutterSource = createFlutterSourceEntry({
+      design: sourceDesign,
+      modules,
+      stagedSharedLayers,
+    });
+    await writeFlutterProjectFiles({
+      designName: sourceDesign.designName,
+      mainDart: flutterSource,
+      overwrite: true,
+      projectDir,
+    });
+    await buildFrameworkRenderEntry({
+      design: sourceDesign,
+      outputTarget,
+    });
+    return {
+      frameworkBuildDir: outputTarget.frameworkBuildDir,
+      sourceEntryPath: outputTarget.sourceEntryPath,
+    };
+  }
+
   const sourceModules = rewriteModulesForSourceEntry({ modules, outputTarget });
   const sourceDataPlan = createFrameworkSourceDataPlan(sourceModules);
   const sourceCss = [

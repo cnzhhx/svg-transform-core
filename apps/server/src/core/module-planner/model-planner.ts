@@ -3,6 +3,8 @@ import path from "node:path";
 
 import type { AgentThread } from "../../pipeline/agent-runtime/index.js";
 import { startAgentThread } from "../../pipeline/llm-client.js";
+import { ModelResponseError, runWithModelRetries } from "../../pipeline/model-retry.js";
+import { recordModelRetry } from "../../pipeline/model-usage.js";
 import { AGENT_REASONING_EFFORTS } from "../../config/agent-reasoning.js";
 import {
   getModelPlannerMockResponse,
@@ -156,12 +158,14 @@ const runPlannerTurn = async ({
   moduleDir,
   prompt,
   thread,
+  signal,
 }: {
   attempt: number;
   imagePaths?: string[];
   moduleDir: string;
   prompt: string;
   thread: AgentThread;
+  signal: AbortSignal;
 }) => {
   await writeTextFile(
     path.join(
@@ -171,37 +175,22 @@ const runPlannerTurn = async ({
     prompt,
   );
   const mockResponse = getModelPlannerMockResponse();
+  signal.throwIfAborted();
   if (mockResponse !== undefined) return mockResponse;
 
-  const timeoutMs = getPlannerTurnTimeoutMs();
-  const timeoutReason = `Module planner turn timed out after ${timeoutMs}ms`;
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => {
-    controller.abort(timeoutReason);
-  }, timeoutMs);
-
-  try {
-    const turn = imagePaths?.length
-      ? await thread.run(
-          [
-            { type: "text", text: prompt },
-            ...imagePaths.map((imagePath) => ({
-              type: "local_image" as const,
-              path: imagePath,
-            })),
-          ],
-          { signal: controller.signal },
-        )
-      : await thread.run(prompt, { signal: controller.signal });
-    return turn.finalResponse ?? "";
-  } catch (error) {
-    if (controller.signal.aborted && controller.signal.reason === timeoutReason) {
-      throw new Error(timeoutReason);
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeoutId);
-  }
+  const turn = imagePaths?.length
+    ? await thread.run(
+        [
+          { type: "text", text: prompt },
+          ...imagePaths.map((imagePath) => ({
+            type: "local_image" as const,
+            path: imagePath,
+          })),
+        ],
+        { signal },
+      )
+    : await thread.run(prompt, { signal });
+  return turn.finalResponse ?? "";
 };
 
 const runModelPlanner = async (
@@ -213,7 +202,7 @@ const runModelPlanner = async (
     request,
   );
 
-  const thread = startAgentThread(
+  const createThread = () => startAgentThread(
     {
       additionalDirectories: [
         input.artifactDir,
@@ -234,53 +223,89 @@ const runModelPlanner = async (
     },
     { modelRole: "vision" },
   );
+  let thread = createThread();
 
   let latestValidation: ModulePlanValidationResult | undefined;
   let latestResponse: unknown;
-  const totalAttempts = Math.max(1, Math.floor(input.plannerRetries) + 1);
+  const deadline = AbortSignal.timeout(getPlannerTurnTimeoutMs());
+  const signal = input.signal ? AbortSignal.any([input.signal, deadline]) : deadline;
+  const historyDir = path.join(input.moduleDir, "planner-history", `${Date.now()}-${process.pid}`);
+  let attemptCount = 0;
 
   try {
-    for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
-      const raw = await runPlannerTurn({
-        attempt,
-        imagePaths:
-          attempt === 1
-            ? (input.design.previewImages?.map((image) => image.imagePath) ?? [
-                input.design.previewImagePath,
-              ])
-            : undefined,
-        moduleDir: input.moduleDir,
-        prompt:
-          attempt === 1
-            ? buildInitialPrompt(request)
-            : buildRetryPrompt({
-                attempt: attempt - 1,
-                validation: latestValidation!,
-              }),
-        thread,
-      });
-      const parsed = parseModelPlannerResponse(raw);
-      latestResponse = parsed.response;
-      await writeResponseArtifacts({
-        moduleDir: input.moduleDir,
-        parsed,
-        raw,
-      });
-
-      const validation = parsed.error
-        ? validationFromIssue(parsed.error)
-        : validateModelPlan({
-            containerLayout: input.containerLayout,
-            response: parsed.response,
-            viewport: input.viewport,
+    return await runWithModelRetries({
+      maxRetries: input.plannerRetries,
+      signal,
+      onRetry: async (retry) => {
+        recordModelRetry(retry, { source: 'module-planner' });
+        if (retry.error instanceof ModelResponseError && latestValidation) {
+          await writeRetryArtifact({ attempt: retry.number, moduleDir: input.moduleDir, validation: latestValidation });
+        }
+      },
+      run: async (retry): Promise<ModelPlannerSuccess> => {
+        signal.throwIfAborted();
+        const attempt = (retry?.number ?? 0) + 1;
+        attemptCount = attempt;
+        if (retry?.freshThread) {
+          thread = createThread();
+          latestValidation = undefined;
+        }
+        const attemptDir = path.join(historyDir, String(attempt));
+        let raw: string;
+        try {
+          raw = await runPlannerTurn({
+            signal,
+            attempt,
+            imagePaths:
+              !latestValidation
+                ? (input.design.previewImages?.map((image) => image.imagePath) ?? [
+                    input.design.previewImagePath,
+                  ])
+                : undefined,
+            moduleDir: attemptDir,
+            prompt:
+              !latestValidation
+                ? buildInitialPrompt(request)
+                : buildRetryPrompt({
+                    attempt: attempt - 1,
+                    validation: latestValidation,
+                  }),
+            thread,
           });
-      latestValidation = validation;
-      await writeValidationArtifact({
-        moduleDir: input.moduleDir,
-        validation,
-      });
+        } catch (error) {
+          signal.throwIfAborted();
+          const message = error instanceof Error ? error.message : String(error);
+          await writeJsonFile(path.join(attemptDir, "error.json"), { message });
+          throw error;
+        }
+        const parsed = parseModelPlannerResponse(raw);
+        latestResponse = parsed.response;
+        await writeResponseArtifacts({
+          moduleDir: input.moduleDir,
+          parsed,
+          raw,
+        });
 
-      if (validation.passed) {
+        const validation = parsed.error
+          ? validationFromIssue(parsed.error)
+          : validateModelPlan({
+              containerLayout: input.containerLayout,
+              response: parsed.response,
+              viewport: input.viewport,
+            });
+        latestValidation = validation;
+        await writeResponseArtifacts({ moduleDir: attemptDir, parsed, raw });
+        await writeValidationArtifact({ moduleDir: attemptDir, validation });
+        await writeValidationArtifact({
+          moduleDir: input.moduleDir,
+          validation,
+        });
+
+        if (!validation.passed) {
+          throw new ModelResponseError(`Model planner validation failed: ${
+            validation.errors.slice(0, 3).map(issue => issue.message).join('; ') || 'unknown validation error'
+          }`);
+        }
         const response = parsed.response as ModelPlannerResponse;
         return {
           attemptCount: attempt,
@@ -296,33 +321,12 @@ const runModelPlanner = async (
           status: "success",
           validation,
         };
-      }
-
-      if (attempt < totalAttempts) {
-        await writeRetryArtifact({
-          attempt,
-          moduleDir: input.moduleDir,
-          validation,
-        });
-      }
-    }
-
-    return {
-      attemptCount: totalAttempts,
-      failureReason: `Model planner validation failed after ${totalAttempts} attempt(s): ${
-        latestValidation?.errors
-          .slice(0, 3)
-          .map((issue) => issue.message)
-          .join("; ") || "unknown validation error"
-      }`,
-      request,
-      response: latestResponse,
-      status: "failed",
-      validation: latestValidation,
-    };
+      },
+    });
   } catch (error) {
+    input.signal?.throwIfAborted();
     return {
-      attemptCount: Math.max(1, totalAttempts),
+      attemptCount,
       failureReason: `Model planner failed: ${error instanceof Error ? error.message : String(error)}`,
       request,
       response: latestResponse,

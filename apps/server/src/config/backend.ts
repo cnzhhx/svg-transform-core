@@ -102,20 +102,28 @@ const readPositiveNumber = (envName: string, fallback: number) => {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
+const readConcurrency = (name: string, fallback: number) => {
+  const value = process.env[name] === undefined ? fallback : Number(process.env[name]);
+  if (!Number.isInteger(value) || value < 1 || value > 128) {
+    throw new Error(`${name} must be an integer between 1 and 128`);
+  }
+  return value;
+};
+
 const resolveRepoRelativePath = (value: string) =>
   path.isAbsolute(value) ? value : path.resolve(repoRoot(), value);
 
 const buildBackendConfig = () => {
   const nodeEnv = readBackendEnvString("NODE_ENV") ?? "development";
-  const maxParallelModuleAgents = readNumber("MAX_PARALLEL_MODULE_AGENTS", 5);
+  const maxParallelModuleAgents = readConcurrency("MAX_PARALLEL_MODULE_AGENTS", 5);
 
   return {
     agent: {
-      maxConcurrentAgents: readNumber("MAX_CONCURRENT_AGENTS", 2),
+      maxConcurrentAgents: readConcurrency("MAX_CONCURRENT_AGENTS", 2),
       maxParallelModuleAgents,
-      semanticVisionConcurrency: readNumber(
+      semanticVisionConcurrency: readConcurrency(
         "SEMANTIC_VISION_CONCURRENCY",
-        Math.min(readNumber("MAX_PARALLEL_MODULE_AGENTS", 10), 3),
+        Math.min(maxParallelModuleAgents, 3),
       ),
       moduleTimeoutMs: readNumber("MODULE_AGENT_TIMEOUT_MS", 3_600_000),
       moduleCoordinatorEnabled: readTruthyFlag(
@@ -133,7 +141,7 @@ const buildBackendConfig = () => {
     },
     browser: {
       browserPath: readBackendEnvString("BROWSER_PATH"),
-      cdpOperationConcurrency: readPositiveNumber(
+      cdpOperationConcurrency: readConcurrency(
         "CDP_OPERATION_CONCURRENCY",
         1,
       ),
@@ -217,6 +225,10 @@ const buildBackendConfig = () => {
       support: parseReasoningEffort(
         readBackendEnvString("SUPPORT_AGENT_REASONING_EFFORT"),
         "high",
+      ),
+      vision: parseReasoningEffort(
+        readBackendEnvString("VISION_MODEL_REASONING_EFFORT"),
+        "medium",
       ),
     },
     runtime: {

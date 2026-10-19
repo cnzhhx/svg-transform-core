@@ -28,7 +28,7 @@ const parseFormat = (args: string[]) => {
   const raw = parseFlagValue(args, "--format");
   if (!raw) {
     throw new Error(
-      "Missing required --format <html|vue|react>",
+      "Missing required --format <html|vue|react|flutter>",
     );
   }
   return parseOutputFormat(raw);
@@ -43,7 +43,7 @@ const main = async () => {
 
   if (!inputPath) {
     throw new Error(
-      "Usage: pnpm exec tsx src/cli/generate-design.ts 设计稿.svg路径 --format <html|vue|react> [--force|force] [--scale 1]",
+      "Usage: pnpm exec tsx src/cli/generate-design.ts 设计稿.svg路径 --format <html|vue|react|flutter> [--force|force] [--scale 1]",
     );
   }
   const containerLayout = await createContainerLayoutReport({

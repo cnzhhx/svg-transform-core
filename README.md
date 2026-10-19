@@ -4,11 +4,15 @@ Core SVG transform service plus a lightweight HTTP client SDK.
 
 Published artifacts:
 
-- Docker image: `ghcr.io/cnzhhx/svg-transform-core:0.2.0`
+- Docker image: `ghcr.io/cnzhhx/svg-transform-core:0.2.1`
 - npm SDK: `@svg-transform/core-client`
 
 The service is intentionally core-only. It does not include account systems,
 billing, quotas, orders, tenant rules, or a business frontend.
+
+Runtime behavior and migration notes for quality policies, restart recovery,
+immutable deliverables, SSE reconnection, and non-root containers are documented
+in [configuration](docs/configuration.md#recovery-delivery-and-runtime-boundaries).
 
 ## Quick Start
 
@@ -37,14 +41,18 @@ Start the published Docker image:
 ```bash
 docker run -d \
   --name svg-transform-core \
-  -p 4310:4310 \
+  -p 127.0.0.1:4310:4310 \
   --env-file .runtime/core.env \
   -e MAX_CONCURRENT_AGENTS=2 \
   -e MAX_PARALLEL_MODULE_AGENTS=5 \
   -v "$PWD/workspace:/app/workspace" \
   -v "$PWD/.runtime/model-provider.json:/app/config/model-provider.json:ro" \
-  ghcr.io/cnzhhx/svg-transform-core:0.2.0
+  ghcr.io/cnzhhx/svg-transform-core:0.2.1
 ```
+
+The service has no built-in authentication. Keep the default loopback binding
+for local use. Put it behind an authenticated reverse proxy before exposing it
+to another machine or the public internet.
 
 Check health:
 
@@ -64,7 +72,8 @@ curl -F svg=@design.svg \
   http://127.0.0.1:4310/api/jobs
 ```
 
-Start the returned `jobId`:
+Non-dry-run uploads are queued automatically. If the job was created with
+`dryRun=1`, start the returned `jobId` explicitly:
 
 ```bash
 curl -X POST http://127.0.0.1:4310/api/jobs/<jobId>/start
@@ -118,8 +127,6 @@ const events = client.connectJobEvents(job.jobId, {
   onError: (error) => console.error(error),
 });
 
-await client.startJob(job.jobId);
-
 const terminal = new Set(["completed", "best-effort", "failed", "failed-gate"]);
 let current = await client.getJob(job.jobId);
 
@@ -149,7 +156,18 @@ SDK methods:
 - `jobFileUrl(jobId, path)`
 - `deleteJob(jobId)`
 
-Supported `outputFormat` values are `html`, `vue`, and `react`.
+Supported `outputFormat` values are `html`, `vue`, `react`, and `flutter`.
+
+Flutter output is a complete project beside the uploaded SVG, with the entry at
+`<design>.flutter/lib/main.dart`. The service builds that project with Flutter
+Web and uses the compiled result for the same browser screenshot and pixel-diff
+verification as the other formats. A Flutter SDK must be available on `PATH`,
+or `FLUTTER_BIN` must point to its executable. The service reports a clear build
+error when Flutter is unavailable; it never substitutes the HTML preview for a
+Flutter render.
+
+The published base image does not bundle the large Flutter SDK. Build a derived
+image with Flutter on `PATH` when containerized Flutter output is required.
 
 ## Model Configuration
 
@@ -208,10 +226,10 @@ EOF
 Pull the published image:
 
 ```bash
-docker pull ghcr.io/cnzhhx/svg-transform-core:0.2.0
+docker pull ghcr.io/cnzhhx/svg-transform-core:0.2.1
 ```
 
-The `latest` tag is also updated on version releases:
+The `latest` tag is also updated on stable version releases:
 
 ```bash
 docker pull ghcr.io/cnzhhx/svg-transform-core:latest
@@ -223,7 +241,7 @@ container:
 ```bash
 mkdir -p .runtime
 cp apps/server/config/model-provider.example.json .runtime/model-provider.json
-SVG_TRANSFORM_CORE_IMAGE=ghcr.io/cnzhhx/svg-transform-core:0.2.0 pnpm docker:recreate
+SVG_TRANSFORM_CORE_IMAGE=ghcr.io/cnzhhx/svg-transform-core:0.2.1 pnpm docker:recreate
 ```
 
 Useful helper commands:
@@ -254,14 +272,29 @@ responses expose URLs and job-relative paths, not container absolute paths.
 
 ## Local Development
 
+Use Node.js `22.16.x` and pnpm `10.11.x`; `.node-version` and `packageManager`
+encode those repository tool versions.
+
 For non-Docker server development:
 
 ```bash
-pnpm install
+pnpm install --frozen-lockfile
 cp apps/server/config/model-provider.example.json apps/server/config/model-provider.json
 pnpm run build
 PORT=4310 pnpm run dev
 ```
+
+Run the complete local quality gate before opening a pull request:
+
+```bash
+pnpm check
+```
+
+This checks release metadata, lint, strict TypeScript settings, production
+builds, all workspace tests, and the SDK tarball installed in an isolated
+consumer (including public exports and types). Each package is built once
+during this check. See `CONTRIBUTING.md` for browser setup and individual
+commands, and `docs/configuration.md` for all environment options.
 
 Create a dry-run job without consuming model quota:
 
@@ -283,6 +316,7 @@ Server config lives under `apps/server`.
 - `WORKSPACE`: job workspace, default `apps/server/workspace` for local server commands.
 - `MODEL_PROVIDER_CONFIG`: model config path, default `apps/server/config/model-provider.json` for local server commands.
 - `OPENCODE_CLI_PATH`: opencode executable path, default `opencode`.
+- `FLUTTER_BIN`: Flutter executable used for `flutter` output, default `flutter` on `PATH`.
 - `CHROMIUM_PATH`, `CHROME_PATH`, or `BROWSER_PATH`: optional browser override.
 - `MAX_CONCURRENT_AGENTS`: max active jobs.
 - `MAX_PARALLEL_MODULE_AGENTS`: per-job module concurrency.
@@ -292,15 +326,20 @@ Docker sets `WORKSPACE=/app/workspace` and
 
 ## Release Notes
 
-Publish a new Docker image by pushing a version tag:
+Set all three package versions to the next unused SemVer, keep them in sync,
+run the release check, then push the matching version tag. The tag workflow
+repeats the full quality gate before it publishes:
 
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+VERSION=$(node -p "require('./package.json').version")
+RELEASE_TAG="v$VERSION" pnpm check:release
+git tag "v$VERSION"
+git push origin "v$VERSION"
 ```
 
-Publish the SDK from `packages/client`:
+Publish the SDK from `packages/client`. Its `prepack` hook always rebuilds
+`dist` so ignored or stale local output cannot be published:
 
 ```bash
-npm publish --access public --registry https://registry.npmjs.org
+pnpm -C packages/client publish --access public --registry https://registry.npmjs.org
 ```

@@ -7,6 +7,7 @@ import type {
 } from "../config/model-provider.js";
 import { sessionStore } from "../session-store.js";
 import type { AgentTurnMetrics, Usage } from "./agent-runtime/index.js";
+import type { ModelRetry } from "./model-retry.js";
 
 type ModelUsageContext = {
   model?: string;
@@ -57,6 +58,30 @@ const withModelUsageContext = <T>(
 ) => usageContext.run({ ...usageContext.getStore(), ...context }, callback);
 
 const getModelUsageContextModel = () => usageContext.getStore()?.model;
+
+const recordModelRetry = (retry: ModelRetry, input: {
+  sessionId?: string;
+  moduleId?: string;
+  source?: string;
+} = {}) => {
+  const context = usageContext.getStore();
+  const sessionId = input.sessionId ?? context?.sessionId;
+  const source = input.source ?? context?.source ?? 'model';
+  const label = input.moduleId ? `${source}:${input.moduleId}` : source;
+  const message = `[${label}] retry ${retry.number}/${retry.maxRetries} in ${retry.delayMs}ms (${retry.freshThread ? 'new thread' : 'same thread'}): ${retry.error.message}`;
+  if (!sessionId || !sessionStore.get(sessionId)) {
+    console.warn(message);
+    return;
+  }
+  sessionStore.addLog(sessionId, message);
+  sessionStore.addMessage(sessionId, {
+    id: `model-retry-${randomUUID()}`,
+    kind: 'event',
+    moduleId: input.moduleId,
+    role: 'system',
+    text: `模型调用中断，${retry.delayMs / 1000} 秒后重试 ${retry.number}/${retry.maxRetries}${retry.freshThread ? '（重建会话，保留已有文件）' : ''}。`,
+  });
+};
 
 const recordModelUsage = ({
   inputKind,
@@ -128,6 +153,7 @@ const recordModelUsage = ({
 
 export {
   getModelUsageContextModel,
+  recordModelRetry,
   recordModelUsage,
   withModelUsageContext,
 };

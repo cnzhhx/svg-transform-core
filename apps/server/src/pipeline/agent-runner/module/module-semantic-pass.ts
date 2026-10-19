@@ -12,6 +12,8 @@ import { exportSvgNodeAsset } from "../../../cli/export-svg-node-asset.js";
 import type { SvgVerticalModule } from "../../../core/svg-vertical-modules/types.js";
 import type { Box } from "../../../core/geometry.js";
 import { runVisionLlm } from "../../llm-client.js";
+import { ModelResponseError, runWithModelRetries } from "../../model-retry.js";
+import { recordModelRetry } from "../../model-usage.js";
 import { sessionStore } from "../../../session-store.js";
 import { Semaphore } from "../queue/concurrency.js";
 import {
@@ -103,7 +105,7 @@ type ProbeImageResult = {
 type ProbePreviewBackground = "dark" | "light";
 
 const MODULE_ELEMENT_ANALYSIS_VERSION = 3;
-const ANALYSIS_BATCH_SIZES = [6, 4, 2] as const;
+const ANALYSIS_BATCH_SIZE = 6;
 const PROBE_PADDING = 0;
 const SHEET_OUTER_PADDING = 16;
 const SHEET_GAP = 12;
@@ -390,7 +392,7 @@ const buildSheetHtml = ({
   };
 };
 
-const withVisionTimeout = ({
+const withVisionTimeout = async ({
   imagePath,
   prompt,
   runtimeTraceDir,
@@ -404,38 +406,35 @@ const withVisionTimeout = ({
   signal?: AbortSignal;
 }) => {
   const controller = new AbortController();
-  return new Promise<string>((resolve, reject) => {
-    const relayAbort = () => controller.abort(signal?.reason ?? "aborted");
-    const visionTextTimeoutMs = getVisionTextTimeoutMs();
-    const timer = setTimeout(() => {
-      controller.abort("module-semantic-vision-timeout");
-      reject(
-        new Error(
-          `module semantic vision timed out after ${visionTextTimeoutMs}ms`,
-        ),
-      );
-    }, visionTextTimeoutMs);
-    signal?.addEventListener("abort", relayAbort, { once: true });
-    if (signal?.aborted) relayAbort();
-    runVisionLlm({
+  const relayAbort = () => controller.abort(signal?.reason ?? "aborted");
+  const visionTextTimeoutMs = getVisionTextTimeoutMs();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort("module-semantic-vision-timeout");
+  }, visionTextTimeoutMs);
+  signal?.addEventListener("abort", relayAbort, { once: true });
+  if (signal?.aborted) relayAbort();
+  try {
+    // Await process shutdown before a timeout can trigger another vision call.
+    const result = await runVisionLlm({
       imagePath,
       prompt,
       runtimeTraceDir,
       runtimeTraceLabel,
       signal: controller.signal,
-    }).then(
-      (value) => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", relayAbort);
-        resolve(value);
-      },
-      (error) => {
-        clearTimeout(timer);
-        signal?.removeEventListener("abort", relayAbort);
-        reject(error);
-      },
-    );
-  });
+    });
+    controller.signal.throwIfAborted();
+    return result;
+  } catch (error) {
+    if (timedOut) {
+      throw new Error(`module semantic vision timed out after ${visionTextTimeoutMs}ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener("abort", relayAbort);
+  }
 };
 
 const roundBox = (box: Box): Box => ({
@@ -653,40 +652,51 @@ const classifySheetWithVision = async ({
     path.basename(moduleDir),
     "module-semantic",
   );
-  const raw = await withVisionTimeout({
-    imagePath: sheetPath,
-    prompt,
-    runtimeTraceDir: traceDir,
-    runtimeTraceLabel: `${moduleId}-${sheetId}`,
+  return runWithModelRetries({
     signal,
+    onRetry: retry => recordModelRetry(retry, { sessionId, moduleId, source: 'module-semantic' }),
+    run: async () => {
+      const raw = await withVisionTimeout({
+        imagePath: sheetPath,
+        prompt,
+        runtimeTraceDir: traceDir,
+        runtimeTraceLabel: `${moduleId}-${sheetId}`,
+        signal,
+      });
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(stripJsonMarkdown(raw));
+      } catch (error) {
+        throw new ModelResponseError(`semantic vision response for ${sheetId} is invalid JSON`, { cause: error });
+      }
+      if (!Array.isArray(parsed)) {
+        throw new ModelResponseError(`semantic vision response for ${sheetId} is not a JSON array`);
+      }
+
+      const results = new Map<string, ModuleSemanticNodeSemantic>();
+      for (const item of parsed) {
+        if (!item || typeof item !== "object") continue;
+        const normalized = normalizeVisionNodeSemantic(item as VisionNodeSemantic);
+        const id = readString((item as VisionNodeSemantic).id);
+        if (!id) continue;
+        results.set(id, normalized);
+      }
+
+      const missingIds = probes
+        .map((probe) => probe.node.id)
+        .filter((id) => !results.has(id));
+      if (missingIds.length > 0) {
+        throw new ModelResponseError(
+          `semantic vision response for ${sheetId} missed node(s): ${missingIds.join(", ")}`,
+        );
+      }
+      sessionStore.addLog(
+        sessionId,
+        `[module-semantic] ${moduleId}: classified ${probes.length} node(s) from ${sheetId}`,
+      );
+      return results;
+    },
   });
-  const parsed = JSON.parse(stripJsonMarkdown(raw)) as unknown;
-  if (!Array.isArray(parsed)) {
-    throw new Error(`semantic vision response for ${sheetId} is not a JSON array`);
-  }
-
-  const results = new Map<string, ModuleSemanticNodeSemantic>();
-  for (const item of parsed) {
-    if (!item || typeof item !== "object") continue;
-    const normalized = normalizeVisionNodeSemantic(item as VisionNodeSemantic);
-    const id = readString((item as VisionNodeSemantic).id);
-    if (!id) continue;
-    results.set(id, normalized);
-  }
-
-  const missingIds = probes
-    .map((probe) => probe.node.id)
-    .filter((id) => !results.has(id));
-  if (missingIds.length > 0) {
-    throw new Error(
-      `semantic vision response for ${sheetId} missed node(s): ${missingIds.join(", ")}`,
-    );
-  }
-  sessionStore.addLog(
-    sessionId,
-    `[module-semantic] ${moduleId}: classified ${probes.length} node(s) from ${sheetId}`,
-  );
-  return results;
 };
 
 const hasMeaningfulPaint = (node: SemanticProbeNode) =>
@@ -859,6 +869,7 @@ const runSuspiciousTextRecheck = async ({
           sheetId: renderedBatch.sheetId,
           sheetPath: renderedBatch.sheetPath,
         }),
+        signal,
       );
       recheckedSemantics.forEach((semantic, id) => {
         if (
@@ -871,6 +882,7 @@ const runSuspiciousTextRecheck = async ({
         }
       });
     } catch (error) {
+      signal?.throwIfAborted();
       const message = error instanceof Error ? error.message : String(error);
       sessionStore.addLog(
         sessionId,
@@ -907,6 +919,7 @@ const runSemanticVisionPass = async ({
     { column: number; row: number; sheetId: string }
   >();
   const semanticsById = new Map<string, ModuleSemanticNodeSemantic>();
+  const failedProbeIds = new Set<string>();
   let nextSheetNumber = 1;
 
   const makeFallbackSemantic = (
@@ -924,15 +937,8 @@ const runSemanticVisionPass = async ({
 
   const renderBatchSheet = (
     probes: ProbeArtifact[],
-    batchSizeIndex: number,
   ): Promise<RenderedAnalysisBatch | null> => {
     if (probes.length === 0) return Promise.resolve(null);
-    const batchSize = ANALYSIS_BATCH_SIZES[batchSizeIndex];
-    if (!batchSize) {
-      throw new Error(
-        `[module-semantic] ${module.id}: invalid analysis batch size index ${batchSizeIndex}`,
-      );
-    }
 
     const renderTask = renderSheetChain.then(async () => {
       const sheetNumber = nextSheetNumber;
@@ -945,7 +951,7 @@ const runSemanticVisionPass = async ({
         sheetId,
       });
       return {
-        batchSize,
+        batchSize: ANALYSIS_BATCH_SIZE,
         layout,
         probes,
         sheetId,
@@ -1000,6 +1006,7 @@ const runSemanticVisionPass = async ({
   }) => {
     const fallbackSemantics = new Map<string, ModuleSemanticNodeSemantic>();
     renderedBatch.probes.forEach((probe) => {
+      failedProbeIds.add(probe.node.id);
       fallbackSemantics.set(probe.node.id, makeFallbackSemantic(error));
     });
     recordSheet({ renderedBatch, sheetSemantics: fallbackSemantics });
@@ -1007,7 +1014,6 @@ const runSemanticVisionPass = async ({
 
   const classifyRenderedBatch = async (
     renderedBatch: RenderedAnalysisBatch,
-    batchSizeIndex: number,
   ): Promise<void> => {
     try {
       const sheetSemantics = await visionSemaphore.run(() =>
@@ -1022,39 +1028,13 @@ const runSemanticVisionPass = async ({
           sheetId: renderedBatch.sheetId,
           sheetPath: renderedBatch.sheetPath,
         }),
+        signal,
       );
       recordSheet({ renderedBatch, sheetSemantics });
     } catch (error) {
+      signal?.throwIfAborted();
       const batchError =
         error instanceof Error ? error : new Error(String(error));
-      const nextBatchSize = ANALYSIS_BATCH_SIZES[batchSizeIndex + 1];
-      if (nextBatchSize) {
-        sessionStore.addLog(
-          sessionId,
-          `[module-semantic] ${module.id}: ${renderedBatch.sheetId} batch size ${renderedBatch.batchSize} failed: ${batchError.message}; retrying ${renderedBatch.probes.length} node(s) with batch size ${nextBatchSize}`,
-        );
-        const retryBatches: ProbeArtifact[][] = [];
-        for (
-          let batchStart = 0;
-          batchStart < renderedBatch.probes.length;
-          batchStart += nextBatchSize
-        ) {
-          retryBatches.push(
-            renderedBatch.probes.slice(batchStart, batchStart + nextBatchSize),
-          );
-        }
-        const renderedRetryBatches: RenderedAnalysisBatch[] = [];
-        for (const batch of retryBatches) {
-          const retryBatch = await renderBatchSheet(batch, batchSizeIndex + 1);
-          if (retryBatch) renderedRetryBatches.push(retryBatch);
-        }
-        await Promise.all(
-          renderedRetryBatches.map((retryBatch) =>
-            classifyRenderedBatch(retryBatch, batchSizeIndex + 1),
-          ),
-        );
-        return;
-      }
       sessionStore.addLog(
         sessionId,
         `[module-semantic] ${module.id}: ${renderedBatch.sheetId} batch size ${renderedBatch.batchSize} failed: ${batchError.message}; marking ${renderedBatch.probes.length} node(s) as visual export targets for agent-driven export`,
@@ -1063,7 +1043,7 @@ const runSemanticVisionPass = async ({
     }
   };
 
-  const initialBatchSize = ANALYSIS_BATCH_SIZES[0];
+  const initialBatchSize = ANALYSIS_BATCH_SIZE;
   const standaloneProbeArtifacts = probeArtifacts.filter(
     shouldClassifyProbeStandalone,
   );
@@ -1094,19 +1074,19 @@ const runSemanticVisionPass = async ({
 
   const renderedPrimaryBatches: RenderedAnalysisBatch[] = [];
   for (const batch of primaryBatches) {
-    const renderedBatch = await renderBatchSheet(batch, 0);
+    const renderedBatch = await renderBatchSheet(batch);
     if (renderedBatch) renderedPrimaryBatches.push(renderedBatch);
   }
   await Promise.all(
     renderedPrimaryBatches.map((renderedBatch) =>
-      classifyRenderedBatch(renderedBatch, 0),
+      classifyRenderedBatch(renderedBatch),
     ),
   );
 
   const recheckedSemanticsById = await runSuspiciousTextRecheck({
     module,
     moduleDir,
-    probeArtifacts,
+    probeArtifacts: probeArtifacts.filter(probe => !failedProbeIds.has(probe.node.id)),
     semanticsById,
     signal,
     sessionId,
@@ -1468,4 +1448,5 @@ const analyzeModuleElements = async ({
 
 export {
   analyzeModuleElements,
+  classifySheetWithVision,
 };

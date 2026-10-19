@@ -84,10 +84,15 @@ class SessionStore extends EventEmitter {
         "failed-gate",
       ]);
       if (status === "queued" || status === "running") {
-        mutateSession.failPipeline(
-          session,
-          "服务已重启，未完成的旧任务已取消，请手动重新启动",
-        );
+        if (process.env['RECOVER_INTERRUPTED_JOBS'] !== '0') {
+          const queuedAt = session.queuedAt ?? session.createdAt;
+          session.status = 'failed';
+          mutateSession.markQueued(session);
+          session.queuedAt = queuedAt;
+          session.result.recovering = true;
+        } else {
+          mutateSession.failPipeline(session, "服务已重启，请手动重新启动");
+        }
       } else if (!supportedStatuses.has(status)) {
         mutateSession.failPipeline(
           session,
@@ -113,6 +118,13 @@ class SessionStore extends EventEmitter {
     });
     return created;
   }
+
+  async flushSessionWrites(id: string) {
+    const session = this.sessions.get(id);
+    if (session) await this.persistence.flushSessionWrites(session);
+  }
+
+  flushAll() { return this.persistence.flushAll(); }
 
   get(id: string): Session | undefined {
     const session = this.sessions.get(id);
@@ -255,6 +267,7 @@ class SessionStore extends EventEmitter {
     if (!session) return undefined;
     ensureWorkflowProgress(session);
     const next = session.pendingUserMessages.shift();
+    if (next) session.inFlightUserMessages = [...(session.inFlightUserMessages ?? []), next];
     session.updatedAt = Date.now();
     this.persistence.persistSnapshot(session);
     return next;
@@ -281,9 +294,18 @@ class SessionStore extends EventEmitter {
     }
     if (!matched.length) return [];
     session.pendingUserMessages = remaining;
+    session.inFlightUserMessages = [...(session.inFlightUserMessages ?? []), ...matched];
     session.updatedAt = Date.now();
     this.persistence.persistSnapshot(session);
     return matched;
+  }
+
+  acknowledgeModuleMessages(sessionId: string, moduleId: string) {
+    const session = this.sessions.get(sessionId);
+    if (!session) return;
+    session.inFlightUserMessages = (session.inFlightUserMessages ?? []).filter((message) =>
+      typeof message === 'string' || message.moduleId !== moduleId);
+    this.persistence.persistSnapshot(session);
   }
 
   setWorkflowMeta(
@@ -467,7 +489,7 @@ class SessionStore extends EventEmitter {
     sessionId: string,
     options?: {
       detail?: string;
-      status?: "completed";
+      status?: "completed" | "best-effort" | "failed-gate";
     },
   ) {
     const session = this.sessions.get(sessionId);
@@ -521,4 +543,4 @@ class SessionStore extends EventEmitter {
 
 const sessionStore = new SessionStore();
 
-export { sessionStore };
+export { sessionStore, SessionStore };

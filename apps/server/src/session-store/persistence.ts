@@ -1,9 +1,9 @@
 import {
   appendFile,
   mkdir,
+  open,
   rename,
   rm,
-  writeFile,
 } from 'node:fs/promises'
 import path from 'node:path'
 
@@ -23,6 +23,9 @@ type VolatileSessionUpdateEmitter = (
 
 class SessionPersistence {
   private fileWriteQueue = new Map<string, Promise<void>>()
+  private dirtySnapshots = new Map<string, Session>()
+  private scheduledSnapshots = new Set<string>()
+  private writeErrors = new Map<string, unknown>()
 
   constructor(
     private readonly sessions: Map<string, Session>,
@@ -31,12 +34,31 @@ class SessionPersistence {
 
   persistSnapshot(session: Session) {
     const { snapshotPath } = createSessionPaths(session.sessionDir)
-    const payload = `${JSON.stringify(session, null, 2)}\n`
+    this.dirtySnapshots.set(session.id, session)
+    if (this.scheduledSnapshots.has(session.id)) return
+    this.scheduledSnapshots.add(session.id)
     this.enqueueFileWrite(session.id, snapshotPath, async () => {
-      await mkdir(session.sessionDir, { recursive: true })
-      const tmpPath = `${snapshotPath}.${process.pid}.${Date.now()}.tmp`
-      await writeFile(tmpPath, payload, 'utf8')
-      await rename(tmpPath, snapshotPath)
+      try {
+        while (this.dirtySnapshots.has(session.id)) {
+          const latest = this.dirtySnapshots.get(session.id)!
+          this.dirtySnapshots.delete(session.id)
+          const payload = `${JSON.stringify(latest, null, 2)}\n`
+          await mkdir(session.sessionDir, { recursive: true })
+          const tmpPath = `${snapshotPath}.${process.pid}.${Date.now()}.tmp`
+          const file = await open(tmpPath, 'w', 0o600)
+          try {
+            await file.writeFile(payload, 'utf8')
+            await file.sync()
+          } finally { await file.close() }
+          await rename(tmpPath, snapshotPath)
+          if (process.platform !== 'win32') {
+            const directory = await open(session.sessionDir, 'r')
+            try { await directory.sync() } finally { await directory.close() }
+          }
+        }
+      } finally {
+        this.scheduledSnapshots.delete(session.id)
+      }
     })
   }
 
@@ -73,15 +95,20 @@ class SessionPersistence {
     await rm(sessionDir, { recursive: true, force: true })
   }
 
-  private async flushSessionWrites(session: Session) {
+  async flushSessionWrites(session: Session) {
     const { eventsPath, messagesPath, snapshotPath } = createSessionPaths(
       session.sessionDir,
     )
-    await Promise.all(
-      [eventsPath, messagesPath, snapshotPath].map(
-        (filePath) => this.fileWriteQueue.get(filePath) ?? Promise.resolve(),
-      ),
-    )
+    const files = [eventsPath, messagesPath, snapshotPath]
+    while (files.some((file) => this.fileWriteQueue.has(file))) {
+      await Promise.all(files.map((file) => this.fileWriteQueue.get(file)))
+    }
+    for (const file of files) if (this.writeErrors.has(file)) throw this.writeErrors.get(file)
+  }
+
+  async flushAll() {
+    while (this.fileWriteQueue.size) await Promise.all([...this.fileWriteQueue.values()])
+    if (this.writeErrors.size) throw new Error('Session persistence failed; inspect server logs')
   }
 
   private recordFileWriteFailure(
@@ -111,6 +138,8 @@ class SessionPersistence {
     const session = this.sessions.get(sessionId)
     const persistence = session?.persistence
     if (!session || !persistence?.lastErrorAt) return
+    const sessionPaths = Object.values(createSessionPaths(session.sessionDir))
+    if (sessionPaths.some((file) => this.writeErrors.has(file))) return
     if ((persistence.lastSuccessAt ?? 0) >= persistence.lastErrorAt) return
 
     const nextPersistence = {
@@ -134,9 +163,11 @@ class SessionPersistence {
       .catch(() => undefined)
       .then(async () => {
         await write()
+        this.writeErrors.delete(filePath)
         this.recordFileWriteSuccess(sessionId)
       })
       .catch((error) => {
+        this.writeErrors.set(filePath, error)
         this.recordFileWriteFailure(sessionId, filePath, error)
       })
       .finally(() => {

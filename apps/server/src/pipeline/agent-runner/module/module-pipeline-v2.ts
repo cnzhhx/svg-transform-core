@@ -1,6 +1,6 @@
 import path from "node:path";
 
-import { getSemanticVisionConcurrency } from "../../../config/index.js";
+import { resourcePool } from '../../../core/resources.js';
 import { normalizeOutputFormat } from "../../../core/output-target.js";
 import type { ResolvedDesignTarget } from "../../../core/design-resolve.js";
 import { writeJsonFile } from "../../../core/file-io.js";
@@ -9,7 +9,6 @@ import type { SessionEvent } from "../../../session-store.js";
 import type { AgentThread } from "../../agent-runtime/index.js";
 import { readModulePlan } from "../../module-merge/index.js";
 
-import { Semaphore } from "../queue/concurrency.js";
 import { throwIfRunAborted } from "../session/run-control.js";
 import {
   ensureScaffoldSnapshot,
@@ -106,18 +105,17 @@ export async function runModulePipelineV2(
     "module-agent-manifest.json",
   );
   const moduleThreads = new Map<string, AgentThread>();
-  const moduleAgentRuns: ModuleAgentRunRecord[] = [];
-  const moduleValidationRuns: ModuleValidationRun[] = [];
+  const moduleAgentRuns = [...(currentSession.result.moduleAgentRuns ?? [])] as ModuleAgentRunRecord[];
+  const moduleValidationRuns = [...(currentSession.result.moduleValidationRuns ?? [])] as ModuleValidationRun[];
   const failedModules = new Map<string, string>();
   const failedModuleKinds = new Map<string, ModuleValidationFailureKind>();
   const persistedModuleThreadIds = readPersistedModuleAgentThreadIds(sessionId);
 
-  const semanticVisionConcurrency = getSemanticVisionConcurrency();
-  const visionSemaphore = new Semaphore(semanticVisionConcurrency);
+  const visionSemaphore = resourcePool('vision');
 
   sessionStore.addLog(
     sessionId,
-    `[module-pipeline-v2] starting unified module pipeline: modules=${modules.length}, maxParallel=${maxParallelModuleAgents}, visionConcurrency=${semanticVisionConcurrency}`,
+    `[module-pipeline-v2] starting unified module pipeline: modules=${modules.length}, maxParallel=${maxParallelModuleAgents}, visionConcurrency=global`,
   );
 
   const completedInitialModules = new Set<string>();
@@ -125,6 +123,7 @@ export async function runModulePipelineV2(
   const activeLiveRevisions = new Map<string, Promise<void>>();
   let liveRevisionChain = Promise.resolve();
   const runLiveRevisionForModule = async (moduleId: string) => {
+    throwIfRunAborted(controller);
     if (!completedInitialModules.has(moduleId)) return;
     if (activeLiveRevisions.has(moduleId)) return activeLiveRevisions.get(moduleId);
     const module = modules.find((candidate) => candidate.id === moduleId);
@@ -132,6 +131,7 @@ export async function runModulePipelineV2(
     const messages = sessionStore.dequeuePendingMessagesForModule(sessionId, moduleId);
     if (!messages.length) return;
     const task = liveRevisionChain.then(async () => {
+      throwIfRunAborted(controller);
       let batch = messages;
       while (batch.length) {
         const userInstructions = batch
@@ -241,8 +241,12 @@ export async function runModulePipelineV2(
       visionSemaphore,
     });
     await Promise.all([...activeLiveRevisions.values()]);
+  } catch (error) {
+    controller.abort(error);
+    throw error;
   } finally {
     sessionStore.off(`session:${sessionId}`, liveMessageListener);
+    await Promise.allSettled([...activeLiveRevisions.values()]);
   }
   throwIfRunAborted(controller);
 

@@ -121,6 +121,7 @@ const runModulePipelineFinalization = async ({
     items: modules,
     limit: maxParallelModuleAgents,
     signal: controller.signal,
+    cancelOnError: (error) => controller.abort(error),
     worker: async (module) => {
       throwIfRunAborted(controller);
       const moduleDir = getModuleDir(modulesRootDir, module);
@@ -139,13 +140,11 @@ const runModulePipelineFinalization = async ({
         return;
       }
 
-      if (failedModuleKinds.get(module.id) !== "module_input_failed") {
-        failedModules.delete(module.id);
-        failedModuleKinds.delete(module.id);
-      }
+      // File presence cannot overturn an earlier build or visual validation.
     },
   });
   throwIfRunAborted(controller);
+  const mergeStartedAt = Date.now();
   const finalMergeResult = await mergeModulesIntoHtml({
     design,
     modulePlanPath,
@@ -174,6 +173,9 @@ const runModulePipelineFinalization = async ({
     true,
     { mode: "full", signal: controller.signal },
   );
+  const timedSession = sessionStore.get(sessionId);
+  if (timedSession) sessionStore.update(sessionId, { result: { ...timedSession.result,
+    stageTimings: { ...timedSession.result.stageTimings, 'merge-and-final-verify': Date.now() - mergeStartedAt } } });
   throwIfRunAborted(controller);
   moduleValidationRuns.push({
     diffRatio: finalVerifyResult.diffRatio,
@@ -250,7 +252,7 @@ const runModulePipelineFinalization = async ({
   }
 
   const failedModuleIds = [...failedModules.keys()].sort();
-  if (failedModuleIds.length) {
+  if (failedModuleIds.some((id) => failedModuleKinds.get(id) !== "module_visual_failed")) {
     throw new Error(
       `Module agent pipeline failed for ${failedModuleIds.length}/${modules.length} module(s): ${failedModuleIds.join(", ")}`,
     );

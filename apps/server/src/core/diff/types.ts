@@ -1,4 +1,6 @@
 type DiffReport = {
+  regions?: Array<{ column: number; row: number; diffPixels: number; totalPixels: number; diffRatio: number }>
+  maxRegionDiffRatio?: number
   diffPixels: number
   diffRatio: number
   height: number

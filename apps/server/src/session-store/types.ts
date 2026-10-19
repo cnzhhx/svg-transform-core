@@ -105,6 +105,7 @@ type UploadResultFields = {
 }
 
 type AnalysisResultFields = {
+  stageTimings?: Record<string, number>
   containerLayoutPath?: string
   modulePlanPath?: string
   modulePlanMarkdownPath?: string
@@ -117,6 +118,7 @@ type AnalysisResultFields = {
 }
 
 type AgentResultFields = {
+  recovering?: boolean
   livePreviewEntryPath?: string
   livePreviewUpdatedAt?: number
   livePreviewVersion?: number
@@ -140,6 +142,8 @@ type AgentResultFields = {
 }
 
 type VerifyResultFields = {
+  deliverable?: { zipPath: string; manifestPath: string; version: string }
+  quality?: import('../pipeline/agent-runner/verify/verify-gates.js').QualityAssessment
   artifactUpdatedAt?: number
   diffRatio?: string | number
   svgPngPath?: string
@@ -201,6 +205,7 @@ type Session = {
   logs: string[]
   messages: SessionMessage[]
   pendingUserMessages: Array<string | PendingUserMessage>
+  inFlightUserMessages?: Array<string | PendingUserMessage>
   progress?: WorkflowProgress
   persistence?: SessionPersistenceState
   createdAt: number

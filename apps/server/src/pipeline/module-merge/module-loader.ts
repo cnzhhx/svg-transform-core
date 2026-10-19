@@ -329,7 +329,7 @@ const assertSourcePreviewTextConsistency = ({
     .slice(0, 20);
   if (!missing.length) return;
   throw new Error(
-    `${moduleId} ${sourceFragmentLabel} is out of sync with preview.fragment.html; missing visible text token(s): ${missing.join(", ")}. Vue/React final HTML is built from source, so keep source fragment/source-data synchronized with the preview fragment.`,
+    `${moduleId} ${sourceFragmentLabel} is out of sync with preview.fragment.html; missing visible text token(s): ${missing.join(", ")}. The final framework render is built from source, so keep the source fragment synchronized with the preview fragment.`,
   );
 };
 
@@ -369,6 +369,11 @@ const loadResolvedModule = async ({
             defaultFileName: "source.fragment.jsx",
             moduleDir,
           })
+        : outputFormat === "flutter"
+          ? resolveModuleFilePath({
+              defaultFileName: "source.fragment.dart",
+              moduleDir,
+            })
         : undefined;
   const sourceDataPath =
     outputFormat === "vue" || outputFormat === "react"

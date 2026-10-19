@@ -18,6 +18,7 @@ type SvgLayoutNode = {
   siblingIndex: number;
   tag: string;
   textContent?: string;
+  textLines?: Array<{ text: string; region: Box }>;
   viewBoxBox: Box | null;
   visibleBox?: Box | null;
 };
@@ -280,13 +281,13 @@ const readSvgLayout = async ({
           return output
         }
 
-        const toPixelBox = (clientRect) => {
+        const toPixelBox = (clientRect, clipToViewport = true) => {
           if (!clientRect || (!clientRect.width && !clientRect.height)) return null
 
-          const clippedLeft = Math.max(rect.left, clientRect.left)
-          const clippedTop = Math.max(rect.top, clientRect.top)
-          const clippedRight = Math.min(rect.right, clientRect.right)
-          const clippedBottom = Math.min(rect.bottom, clientRect.bottom)
+          const clippedLeft = clipToViewport ? Math.max(rect.left, clientRect.left) : clientRect.left
+          const clippedTop = clipToViewport ? Math.max(rect.top, clientRect.top) : clientRect.top
+          const clippedRight = clipToViewport ? Math.min(rect.right, clientRect.right) : clientRect.right
+          const clippedBottom = clipToViewport ? Math.min(rect.bottom, clientRect.bottom) : clientRect.bottom
           const clippedWidth = clippedRight - clippedLeft
           const clippedHeight = clippedBottom - clippedTop
 
@@ -309,6 +310,45 @@ const readSvgLayout = async ({
                 width: Number((pixelBox.width / Math.max(0.000001, scale.x)).toFixed(3)),
                 height: Number((pixelBox.height / Math.max(0.000001, scale.y)).toFixed(3)),
               }
+
+        const readTextLines = (element) => {
+          const lines = []
+          const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT)
+          const range = document.createRange()
+          let textNode
+          while ((textNode = walker.nextNode())) {
+            let offset = 0
+            for (const character of Array.from(textNode.textContent || '')) {
+              range.setStart(textNode, offset)
+              offset += character.length
+              range.setEnd(textNode, offset)
+              // Keep the complete text and its original line offsets, including
+              // glyphs outside the viewport. The final container owns clipping.
+              const box = toPixelBox(range.getBoundingClientRect(), false)
+              if (!box || box.width <= 0) continue
+              const line = lines.find((candidate) => {
+                const overlap = Math.min(candidate.region.y + candidate.region.height, box.y + box.height) - Math.max(candidate.region.y, box.y)
+                return overlap / Math.max(0.001, Math.min(candidate.region.height, box.height)) >= 0.5
+              })
+              if (!line) {
+                lines.push({ text: character, region: box })
+                continue
+              }
+              line.text += character
+              const right = Math.max(line.region.x + line.region.width, box.x + box.width)
+              const bottom = Math.max(line.region.y + line.region.height, box.y + box.height)
+              line.region.x = Math.min(line.region.x, box.x)
+              line.region.y = Math.min(line.region.y, box.y)
+              line.region.width = right - line.region.x
+              line.region.height = bottom - line.region.y
+            }
+          }
+          const preserveWhitespace = getComputedStyle(element).whiteSpace.startsWith('pre')
+          return lines.map((line) => ({
+            text: preserveWhitespace ? line.text : line.text.trim(),
+            region: Object.fromEntries(Object.entries(line.region).map(([key, value]) => [key, Number(value.toFixed(3))])),
+          })).filter((line) => line.text.length > 0)
+        }
 
         const walk = (node, depth, parentPath) => {
           if (!(node instanceof SVGElement)) return []
@@ -335,6 +375,7 @@ const readSvgLayout = async ({
             textContent: (['text', 'tspan'].includes(node.tagName.toLowerCase()) && node.textContent?.trim())
               ? node.textContent.trim()
               : undefined,
+            textLines: node.tagName.toLowerCase() === 'text' ? readTextLines(node) : undefined,
             viewBoxBox: toViewBoxBox(pixelBox),
             visibleBox: null,
           }

@@ -45,7 +45,16 @@ const persistModuleAgentThreadId = ({
   });
 };
 
+const clearPersistedModuleAgentThreadId = (sessionId: string, moduleId: string) => {
+  const current = sessionStore.get(sessionId);
+  if (!current) return;
+  const ids = normalizeModuleAgentThreadIds(current.result.moduleAgentThreadIds);
+  delete ids[moduleId];
+  sessionStore.update(sessionId, { result: { ...current.result, moduleAgentThreadIds: ids } });
+};
+
 export {
+  clearPersistedModuleAgentThreadId,
   persistModuleAgentThreadId,
   readPersistedModuleAgentThreadIds,
 };

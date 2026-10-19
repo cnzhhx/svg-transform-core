@@ -72,6 +72,9 @@ const publicResultForJob = (
         compareEntryPath: relativePath(result.outputTarget.compareEntryPath),
         format: result.outputTarget.format,
         frameworkBuildDir: relativePath(result.outputTarget.frameworkBuildDir),
+        frameworkProjectDir: relativePath(
+          result.outputTarget.frameworkProjectDir,
+        ),
         renderEntryPath: relativePath(result.outputTarget.renderEntryPath),
         sourceEntryPath: relativePath(result.outputTarget.sourceEntryPath),
         sourceStylePath: relativePath(result.outputTarget.sourceStylePath),
@@ -89,6 +92,12 @@ const publicResultForJob = (
     designHeight: result.designHeight,
     designWidth: result.designWidth,
     diffRatio: result.diffRatio,
+    quality: result.quality,
+    deliverable: result.deliverable ? { version: result.deliverable.version,
+      manifestPath: relativePath(result.deliverable.manifestPath) } : undefined,
+    diagnosticDownloadUrl: `${baseUrl}/download?kind=diagnostic`,
+    stageTimings: result.stageTimings,
+    moduleValidationRuns: result.moduleValidationRuns,
     downloadUrl: isCompletedJobStatus(job.status)
       ? `${baseUrl}/download`
       : undefined,
@@ -142,6 +151,8 @@ const jobForApi = (
     model: job.model,
     outputFormat: job.outputFormat,
     progress: job.progress,
+    persistence: job.persistence ? { errorCount: job.persistence.errorCount,
+      healthy: !job.persistence.lastErrorAt || (job.persistence.lastSuccessAt ?? 0) >= job.persistence.lastErrorAt } : { errorCount: 0, healthy: true },
     result: publicResultForJob(job, { baseUrl: jobUrl }),
     scale: job.scale,
     status: job.status,

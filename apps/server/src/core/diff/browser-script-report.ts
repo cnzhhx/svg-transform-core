@@ -7,6 +7,8 @@ const DIFF_BROWSER_REPORT_RUNTIME = String.raw`
       diffPixels,
       diffRatio: toFixedNumber(diffPixels / totalPixels),
       totalPixels,
+      regions: regions.map((region) => ({ ...region, diffRatio: toFixedNumber(region.diffPixels / Math.max(1, region.totalPixels)) })),
+      maxRegionDiffRatio: Math.max(...regions.map((region) => region.diffPixels / Math.max(1, region.totalPixels))),
       width,
       height,
     },

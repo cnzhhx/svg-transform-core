@@ -1,11 +1,13 @@
 type RootChildElement = {
   closeTag: string;
   content: string;
+  endOffset: number;
   innerContent: string;
   nthOfType: number;
   openTag: string;
   pathSegment: string;
   selfClosing: boolean;
+  startOffset: number;
   tag: string;
 };
 
@@ -89,7 +91,13 @@ const parseRootChildElements = (content: string): RootChildElement[] => {
       content.startsWith("<?", nextOpen) ||
       content.startsWith("<!", nextOpen)
     ) {
-      const closeToken = content.startsWith("<!--", nextOpen) ? "-->" : ">";
+      const closeToken = content.startsWith("<!--", nextOpen)
+        ? "-->"
+        : content.startsWith("<![CDATA[", nextOpen)
+          ? "]]>"
+          : content.startsWith("<?", nextOpen)
+            ? "?>"
+            : ">";
       const closeIndex = content.indexOf(closeToken, nextOpen + 2);
       cursor =
         closeIndex === -1 ? content.length : closeIndex + closeToken.length;
@@ -131,11 +139,13 @@ const parseRootChildElements = (content: string): RootChildElement[] => {
     children.push({
       closeTag,
       content: rawElement,
+      endOffset: nextOpen + elementEnd,
       innerContent,
       nthOfType,
       openTag,
       pathSegment: `${tag}:nth-of-type(${nthOfType})`,
       selfClosing,
+      startOffset: nextOpen,
       tag,
     });
     cursor = nextOpen + elementEnd;

@@ -108,6 +108,7 @@ export type ModulePlannerMetadata = {
 };
 
 export type ModelPlannerInput = {
+  signal?: AbortSignal;
   artifactDir: string;
   constraints: ModulePlannerConstraints;
   containerLayout?: ContainerLayoutReport;
@@ -121,7 +122,7 @@ export type ModelPlannerInput = {
   };
   mode: "auto" | "single" | "vertical";
   moduleDir: string;
-  plannerRetries: number;
+  plannerRetries?: number;
   svgLayout?: SvgLayoutResult;
   viewport: Box;
 };

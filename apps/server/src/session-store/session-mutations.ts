@@ -193,7 +193,11 @@ const isTerminalSessionStatus = (status: string) =>
   status === 'completed' || status === 'best-effort' || status === 'failed-gate'
 
 const markQueued = (session: Session) => {
-  const wasTerminal = isTerminalSessionStatus(session.status)
+  if (session.inFlightUserMessages?.length) {
+    session.pendingUserMessages = [...session.inFlightUserMessages, ...session.pendingUserMessages];
+    session.inFlightUserMessages = [];
+  }
+  const wasTerminal = isTerminalSessionStatus(session.status) || session.status === 'failed'
   const progress = ensureWorkflowProgress(session)
   const nextProgress = wasTerminal
     ? {
@@ -263,7 +267,7 @@ const completePipeline = (
   session: Session,
   options?: {
     detail?: string
-    status?: Extract<SessionStatus, 'completed'>
+    status?: Extract<SessionStatus, 'completed' | 'best-effort' | 'failed-gate'>
   },
 ) => {
   const progress = ensureWorkflowProgress(session)

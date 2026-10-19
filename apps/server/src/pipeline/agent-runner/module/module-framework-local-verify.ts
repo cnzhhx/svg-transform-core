@@ -1,5 +1,6 @@
 import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
+import { cachedModuleVerification, saveModuleCandidate, candidateContext } from '../../../core/artifact-cache.js';
 
 import {
   buildFrameworkProject,
@@ -18,6 +19,15 @@ import type { ModuleFragmentManifest } from "../../module-merge/types.js";
 import { getModuleDiffRatioThreshold } from "../../../config/index.js";
 import { readModuleAllowedAssets } from "./module-semantic.js";
 import { verifyDesign } from "../../verify.js";
+import {
+  buildFlutterWeb,
+  publishFlutterWebEntry,
+  writeFlutterProjectFiles,
+} from "../../../core/flutter-build.js";
+import {
+  createFlutterModuleSourceEntry,
+  stageFlutterModuleAssets,
+} from "../../module-merge/flutter-source.js";
 
 type ModuleFrameworkLocalVerifyResult = {
   artifactDir: string;
@@ -177,7 +187,100 @@ ${sourceFragment.trim()}
 const getFrameworkVerifyArtifactDir = (moduleDir: string, round: number) =>
   path.join(moduleDir, "verify", `framework-round-${round}`);
 
-export const verifyModuleFrameworkLocal = async ({
+const verifyModuleFlutterLocal = async ({
+  design,
+  module,
+  moduleDir,
+  moduleSvgPath,
+  onProgress,
+  onRenderEntryReady,
+  round,
+  signal,
+}: {
+  design: { scale?: number };
+  module: SvgVerticalModule;
+  moduleDir: string;
+  moduleSvgPath: string;
+  onProgress?: (message: string) => void;
+  onRenderEntryReady?: (renderEntryPath: string) => void;
+  round: number;
+  signal?: AbortSignal;
+}): Promise<ModuleFrameworkLocalVerifyResult> => {
+  const artifactDir = getFrameworkVerifyArtifactDir(moduleDir, round);
+  const entryDir = path.join(artifactDir, "entry");
+  const projectDir = path.join(entryDir, "project");
+  const distDir = path.join(entryDir, "dist");
+  const sourceFragmentPath = path.join(moduleDir, "source.fragment.dart");
+  const sourceFragment = await readFile(sourceFragmentPath, "utf8").catch(
+    () => undefined,
+  );
+  if (!sourceFragment?.trim()) {
+    throw new Error(
+      `${module.id} framework local verify requires source.fragment.dart`,
+    );
+  }
+
+  await rm(artifactDir, { force: true, recursive: true });
+  await writeFlutterProjectFiles({
+    designName: module.id,
+    mainDart: createFlutterModuleSourceEntry({
+      height: module.region.height,
+      moduleId: module.id,
+      sourceFragment,
+      width: module.region.width,
+    }),
+    overwrite: true,
+    projectDir,
+  });
+  await stageFlutterModuleAssets({
+    moduleDir,
+    moduleId: module.id,
+    projectDir,
+  });
+
+  try {
+    await buildFlutterWeb({
+      outputDir: distDir,
+      projectDir,
+      signal,
+    });
+    await publishFlutterWebEntry({
+      outputDir: distDir,
+      renderEntryPath: path.join(distDir, "index.html"),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    onProgress?.(
+      `${module.id} Flutter local build failed: ${message.slice(0, 400)}`,
+    );
+    return {
+      artifactDir,
+      buildError: message,
+      diffRatio: 1,
+      passed: false,
+    };
+  }
+
+  const renderEntryPath = path.join(distDir, "index.html");
+  onRenderEntryReady?.(renderEntryPath);
+  const result = await verifyDesign(moduleSvgPath, onProgress, artifactDir, {
+    mode: "fast",
+    renderEntryPath,
+    scale: design.scale,
+    signal,
+  });
+  return {
+    artifactDir: result.artifactDir,
+    diffPngPath: result.diffPngPath,
+    diffRatio: result.diffRatio,
+    passed: result.diffRatio <= getModuleDiffRatioThreshold(),
+    renderEntryPath,
+    renderPngPath: result.renderPngPath,
+    svgPngPath: result.svgPngPath,
+  };
+};
+
+const verifyModuleFrameworkLocalUncached = async ({
   design,
   module,
   moduleDir,
@@ -194,10 +297,22 @@ export const verifyModuleFrameworkLocal = async ({
   moduleSvgPath: string;
   onProgress?: (message: string) => void;
   onRenderEntryReady?: (renderEntryPath: string) => void;
-  outputFormat?: "vue" | "react";
+  outputFormat?: "vue" | "react" | "flutter";
   round: number;
   signal?: AbortSignal;
 }): Promise<ModuleFrameworkLocalVerifyResult | null> => {
+  if (outputFormat === "flutter") {
+    return verifyModuleFlutterLocal({
+      design,
+      module,
+      moduleDir,
+      moduleSvgPath,
+      onProgress,
+      onRenderEntryReady,
+      round,
+      signal,
+    });
+  }
   const frameworkFormat: FrameworkFormat | null = outputFormat ?? null;
   if (!frameworkFormat) return null;
 
@@ -372,4 +487,18 @@ export const verifyModuleFrameworkLocal = async ({
     renderPngPath: result.renderPngPath,
     svgPngPath: result.svgPngPath,
   };
+};
+
+export const verifyModuleFrameworkLocal = async (input: Parameters<typeof verifyModuleFrameworkLocalUncached>[0]) => {
+  const result = await cachedModuleVerification({
+    moduleDir: input.moduleDir, kind: input.outputFormat ?? 'framework',
+    extras: [input.moduleSvgPath],
+    context: { module: input.module, design: input.design, format: input.outputFormat },
+    signal: input.signal, onProgress: input.onProgress,
+    run: () => verifyModuleFrameworkLocalUncached(input),
+  });
+  if (result?.renderEntryPath) input.onRenderEntryReady?.(result.renderEntryPath);
+  if (result && !result.buildError) await saveModuleCandidate(input.moduleDir, result.diffRatio,
+    await candidateContext(input.moduleDir, input.outputFormat ?? 'framework'));
+  return result;
 };

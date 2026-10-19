@@ -104,6 +104,7 @@ export type SvgVerticalModuleArtifacts = {
 };
 
 export type CreateAdaptiveModulePlanOptions = {
+  signal?: AbortSignal;
   artifactDir?: string;
   containerLayoutReport?: ContainerLayoutReport;
   inputPath: string;

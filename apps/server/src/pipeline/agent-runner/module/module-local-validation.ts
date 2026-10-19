@@ -1,4 +1,5 @@
 import path from "node:path";
+import { saveModuleCheckpoint } from './module-checkpoint.js';
 
 import { getModuleDiffRatioThreshold } from "../../../config/index.js";
 import type { OutputFormat } from "../../../core/output-target.js";
@@ -70,6 +71,7 @@ const collectAgentLocalValidation = async ({
     items: modules,
     limit: maxParallelModuleAgents,
     signal: controller.signal,
+    cancelOnError: (error) => controller.abort(error),
     worker: async (module) => {
       const moduleDir = getModuleDir(modulesRootDir, module);
       throwIfRunAborted(controller);
@@ -132,6 +134,7 @@ const collectAgentLocalValidation = async ({
                 sessionId,
                 `[module-pipeline-v2:${module.id}] framework verify: ${message}`,
               ),
+            outputFormat,
             round: 1,
             signal: controller.signal,
           });
@@ -213,9 +216,15 @@ const collectAgentLocalValidation = async ({
           failedModules.set(module.id, failureMessage);
         }
         failedModuleKinds.set(module.id, resolvedFailureKind);
+      } else if (!preserveExistingInputFailure) {
+        failedModules.delete(module.id);
+        failedModuleKinds.delete(module.id);
+        await saveModuleCheckpoint({ moduleDir, model: sessionStore.get(sessionId)?.model ?? '',
+          format: outputFormat, scale: design.scale, modulePlanPath, scaffoldHtmlPath });
       }
 
       return {
+        textDiagnostics: localVerify?.textDiagnostics,
         diffPixels: localVerify?.diffPixels,
         diffRatio,
         failureKind,

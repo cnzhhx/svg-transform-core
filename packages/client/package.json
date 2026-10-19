@@ -1,6 +1,6 @@
 {
   "name": "@svg-transform/core-client",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "HTTP client SDK for the svg-transform-core service.",
   "license": "MIT",
   "type": "module",
@@ -34,11 +34,27 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.json",
-    "lint:types": "tsc -p tsconfig.json --noEmit"
+    "build": "pnpm run build:compile",
+    "build:compile": "pnpm run clean && tsc -p tsconfig.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { force: true, recursive: true })\"",
+    "lint:types": "pnpm run typecheck",
+    "pack:check": "pnpm run build && pnpm run pack:check:built",
+    "pack:check:built": "node ../../scripts/check-package.mjs",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "pnpm run typecheck && pnpm run test",
+    "test": "pnpm run build && pnpm run test:run",
+    "test:run": "node --test",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org"
   },
   "devDependencies": {
-    "@types/node": "25.9.3",
     "typescript": "5.9.3"
   }
 }

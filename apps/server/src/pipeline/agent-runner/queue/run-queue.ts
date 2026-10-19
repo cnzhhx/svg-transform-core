@@ -16,6 +16,8 @@ const createAgentRunQueue = ({
 }) => {
   const queue: string[] = []
   const queued = new Set<string>()
+  const accepting = new Set<string>()
+  let stopping = false
   const activeRuns = new Map<
     string,
     {
@@ -63,6 +65,7 @@ const createAgentRunQueue = ({
         (session) =>
           session.status === 'queued' &&
           !queued.has(session.id) &&
+          !accepting.has(session.id) &&
           !activeRuns.has(session.id),
       )
       .sort((left, right) => {
@@ -79,6 +82,7 @@ const createAgentRunQueue = ({
   }
 
   const processQueue = () => {
+    if (stopping) return
     refillQueueFromStore()
     while (activeRuns.size < getMaxConcurrentAgents() && queue.length > 0) {
       const sessionId = queue.shift()!
@@ -93,6 +97,10 @@ const createAgentRunQueue = ({
         .finally(() => {
           activeRun.resolveFinished()
           activeRuns.delete(sessionId)
+          const current = sessionStore.get(sessionId)
+          if (!stopping && current?.pendingUserMessages.length && current.status !== 'failed') {
+            void enqueueSession(sessionId).catch((error) => console.error('[queue] pending guidance:', error))
+          }
           processQueue()
         })
     }
@@ -103,13 +111,21 @@ const createAgentRunQueue = ({
     processQueue()
   }
 
-  const enqueueSession = (sessionId: string) => {
-    if (queued.has(sessionId) || activeRuns.has(sessionId)) return
-    sessionStore.markQueued(sessionId)
-    queue.push(sessionId)
-    queued.add(sessionId)
+  const enqueueSession = async (sessionId: string) => {
+    if (stopping) throw new Error('Service is shutting down')
+    if (queued.has(sessionId) || activeRuns.has(sessionId) || accepting.has(sessionId)) return
+    accepting.add(sessionId)
+    try {
+      sessionStore.markQueued(sessionId)
+      await sessionStore.flushSessionWrites(sessionId)
+      if (!sessionStore.get(sessionId)) return
+      queue.push(sessionId)
+      queued.add(sessionId)
+    } catch (error) {
+      sessionStore.failPipeline(sessionId, `Unable to persist queued job: ${String(error)}`)
+      throw error
+    } finally { accepting.delete(sessionId) }
     processQueue()
-    broadcastQueuePositions()
   }
 
   const removeFromQueue = (sessionId: string) => {
@@ -131,6 +147,20 @@ const createAgentRunQueue = ({
   }
 
   return {
+    async shutdown() {
+      stopping = true
+      const running = [...activeRuns.entries()]
+      running.forEach(([, state]) => state.controller.abort('service-shutdown'))
+      await Promise.all(running.map(([, state]) => state.finished))
+      for (const [id] of running) {
+        const session = sessionStore.get(id)
+        if (session && !['completed', 'best-effort', 'failed-gate'].includes(session.status)) {
+          session.status = 'failed'
+          sessionStore.markQueued(id)
+        }
+      }
+      await sessionStore.flushAll()
+    },
     cancelSessionRun,
     enqueueSession,
     processQueuedSessions,

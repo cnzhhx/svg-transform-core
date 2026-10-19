@@ -1,4 +1,5 @@
 import path from "node:path";
+import { withCdpSignal } from '../core/cdp.js';
 
 import { createPixelDiff } from "../core/diff/index.js";
 import { renderDesignTargets } from "../core/render.js";
@@ -8,6 +9,7 @@ import { resolveRenderTarget } from "../core/design-resolve.js";
 type VerifyMode = "full" | "fast";
 
 type VerifyResult = {
+  regionalDiagnostics?: { maxRegionDiffRatio?: number; regions?: Array<{ column: number; row: number; diffRatio: number }> };
   artifactDir: string;
   diffPngPath: string;
   diffRatio: number;
@@ -54,7 +56,7 @@ const createPixelDiffWithRetry = async (
   }
 };
 
-const verifyDesign = async (
+const verifyDesignWithoutSignal = async (
   svgPath: string,
   onProgress: ((message: string) => void) | undefined,
   customArtifactDir: string | undefined,
@@ -107,6 +109,7 @@ const verifyDesign = async (
     artifactDir,
     diffPngPath: path.join(artifactDir, "diff.png"),
     diffRatio: diffResult.report.diffRatio,
+    regionalDiagnostics: { maxRegionDiffRatio: diffResult.report.maxRegionDiffRatio, regions: diffResult.report.regions },
     renderPngPath: renderResult.renderPngPath,
     svgPngPath: renderResult.svgPngPath,
     mode,
@@ -121,6 +124,11 @@ const verifyDesign = async (
 
   onProgress?.("Verification complete.");
   return result;
+};
+
+const verifyDesign = (...args: Parameters<typeof verifyDesignWithoutSignal>) => {
+  const signal = args[3].signal;
+  return signal ? withCdpSignal(signal, () => verifyDesignWithoutSignal(...args)) : verifyDesignWithoutSignal(...args);
 };
 
 export type { VerifyMode, VerifyResult };

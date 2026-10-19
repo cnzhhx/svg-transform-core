@@ -10,6 +10,11 @@ import {
 import type { ResolvedSvgDesign } from "./design-resolve.js";
 import { writeTextFile } from "./file-io.js";
 import type { SessionOutputTarget } from "./output-target.js";
+import { resolveFlutterProjectDir } from "./output-target.js";
+import {
+  buildFlutterWeb,
+  publishFlutterWebEntry,
+} from "./flutter-build.js";
 
 const buildFrameworkRenderEntry = async ({
   design,
@@ -21,6 +26,17 @@ const buildFrameworkRenderEntry = async ({
   if (outputTarget.format === "html") return outputTarget.renderEntryPath;
   if (!outputTarget.frameworkBuildDir) {
     throw new Error(`Missing frameworkBuildDir for ${outputTarget.format}`);
+  }
+
+  if (outputTarget.format === "flutter") {
+    await buildFlutterWeb({
+      outputDir: outputTarget.frameworkBuildDir,
+      projectDir: resolveFlutterProjectDir(outputTarget),
+    });
+    return publishFlutterWebEntry({
+      outputDir: outputTarget.frameworkBuildDir,
+      renderEntryPath: outputTarget.renderEntryPath,
+    });
   }
 
   const frameworkFormat: FrameworkFormat = outputTarget.format;

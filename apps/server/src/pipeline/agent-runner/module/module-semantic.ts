@@ -1,5 +1,8 @@
 import { open, readFile, stat, unlink } from "node:fs/promises";
 import path from "node:path";
+import { fingerprintFiles, readCache, atomicJson } from '../../../core/artifact-cache.js';
+import { getModelUsageContextModel } from '../../model-usage.js';
+import { resolveModelConfigForRole } from '../../../config/model-provider.js';
 import { pathToFileURL } from "node:url";
 
 import { getPngRasterScaleMultiplier } from "../../../config/index.js";
@@ -11,7 +14,8 @@ import { writeJsonFile, writeTextFile } from "../../../core/file-io.js";
 import { readSvgLayout } from "../../../core/svg-layout.js";
 import type { SvgVerticalModule } from "../../../core/svg-vertical-modules/types.js";
 import type { ModuleOutputAllowedAsset } from "../../module-output-policy.js";
-import { textColorFromNodePaint } from "./module-semantic-paint.js";
+import { TEXT_PAINT_OPACITY_STAGE, textColorFromNodePaint } from "./module-semantic-paint.js";
+import { CONVERSION_CACHE_VERSION } from '../../../core/conversion-version.js';
 
 const MODULE_REFERENCE_RENDER_VERSION = 3;
 
@@ -24,6 +28,7 @@ type ModuleSemanticNodeSemantic = {
   exportDecision: "export" | "pending" | "skip";
   kind: string;
   lineCount?: number;
+  lineRegions?: Box[];
   notes?: string;
   text?: string;
   textHandling: "dom-text" | "export-asset" | "ignore" | "pending";
@@ -65,6 +70,7 @@ type ModuleSemanticNode = {
   sheetId?: string;
   tag: string;
   textContent?: string;
+  nativeTextLines?: Array<{ text: string; region: Box }>;
   viewBoxBox?: Box;
   visible: boolean;
   /** Actual visible bounding box after clip-path/mask cropping (intersection of bbox and clip/mask region). */
@@ -86,6 +92,7 @@ type ModuleSemanticTextBlock = {
   color?: string;
   id: string;
   kind?: string;
+  lineCount?: number;
   lineRegions?: Box[];
   lines?: Array<{ region?: Box; text?: string }>;
   [key: string]: unknown;
@@ -137,6 +144,7 @@ type ModuleSemanticDocument = {
   };
   nodes: ModuleSemanticNode[];
   runtime: {
+    sourceFingerprint?: string;
     completedStages: string[];
     nodeFactVersion: number;
     referenceRenderVersion?: number;
@@ -176,8 +184,8 @@ type CreateModuleSemanticDraftResult = {
 };
 
 const MODULE_SEMANTIC_SCHEMA_VERSION = 2;
-const MODULE_SEMANTIC_NODE_FACT_VERSION = 4;
-const MODULE_SEMANTIC_SEMANTIC_PASS_VERSION = 7;
+const MODULE_SEMANTIC_NODE_FACT_VERSION = 6;
+const MODULE_SEMANTIC_SEMANTIC_PASS_VERSION = 8;
 const MODULE_SEMANTIC_TEXT_STYLE_PASS_VERSION = 6;
 
 const IMPORTANT_ATTRS = new Set([
@@ -757,6 +765,9 @@ const ensureModuleReferenceImage = async ({
   scale: number;
 }) => {
   const sourceImagePath = path.join(moduleDir, "module-reference.png");
+  const signaturePath = path.join(moduleDir, '.reference-signature.json');
+  const signature = await fingerprintFiles([moduleSvgPath], { scale, raster: getPngRasterScaleMultiplier(), version: MODULE_REFERENCE_RENDER_VERSION });
+  const savedSignature = await readCache<string>(signaturePath);
   const wrapperPath = path.join(moduleDir, "module-reference-source.html");
   const hasCurrentWrapperVersion = async () => {
     try {
@@ -769,6 +780,7 @@ const ensureModuleReferenceImage = async ({
     }
   };
   if (
+    signature === savedSignature &&
     (await isUpToDate({ outputPath: sourceImagePath, sourcePath: moduleSvgPath })) &&
     (await isUpToDate({ outputPath: sourceImagePath, sourcePath: wrapperPath })) &&
     (await hasCurrentWrapperVersion())
@@ -802,6 +814,7 @@ const ensureModuleReferenceImage = async ({
     await browser.close();
   }
 
+  await atomicJson(signaturePath, signature);
   return { height, sourceImagePath, width };
 };
 
@@ -839,13 +852,15 @@ const ensureModuleContextImages = async ({
   const sharedUnderlaySvgPath = sharedUnderlayLayer.svgPath;
   const compositeOutputPath = path.join(moduleDir, "composite.png");
   const sharedUnderlayOutputPath = path.join(moduleDir, "shared-underlay.png");
+  const contextSignaturePath = path.join(moduleDir, '.context-signature.json');
+  const contextSignature = await fingerprintFiles([moduleSvgPath, sharedUnderlaySvgPath], { scale, module: module.region, underlay: sharedUnderlayLayer.region, raster: getPngRasterScaleMultiplier(), version: MODULE_REFERENCE_RENDER_VERSION });
 
   const [compositeUpToDate, underlayUpToDate] = await Promise.all([
     isUpToDate({ outputPath: compositeOutputPath, sourcePath: moduleSvgPath }),
     isUpToDate({ outputPath: sharedUnderlayOutputPath, sourcePath: moduleSvgPath }),
   ]);
 
-  if (compositeUpToDate && underlayUpToDate) {
+  if (compositeUpToDate && underlayUpToDate && await readCache<string>(contextSignaturePath) === contextSignature) {
     return { compositePath: compositeOutputPath, sharedUnderlayPath: sharedUnderlayOutputPath };
   }
 
@@ -917,6 +932,7 @@ const ensureModuleContextImages = async ({
     await browser.close();
   }
 
+  await atomicJson(contextSignaturePath, contextSignature);
   return { compositePath: compositeOutputPath, sharedUnderlayPath: sharedUnderlayOutputPath };
 };
 
@@ -928,6 +944,19 @@ const buildNodeIdsByPath = (nodePaths: string[]) =>
     ]),
   );
 
+const moduleSemanticFingerprint = async ({ module, moduleSvgPath, scale }: Pick<CreateModuleSemanticDraftInput, "module" | "moduleSvgPath" | "scale">) => {
+  let modelIdentity: unknown = getModelUsageContextModel();
+  try {
+    const model = resolveModelConfigForRole('vision', getModelUsageContextModel());
+    modelIdentity = { id: model.id, model: model.model, baseURL: model.baseURL, wireApi: model.wireApi,
+      contextWindow: model.contextWindow, maxOutputTokens: model.maxOutputTokens,
+      reasoningEffort: model.reasoningEffort, thinking: model.thinking, modalities: model.modalities, headers: model.headers };
+  } catch { /* Standalone structure-only CLI calls may have no provider configuration. */ }
+  return fingerprintFiles([moduleSvgPath], { scale, conversionVersion: CONVERSION_CACHE_VERSION,
+    region: module.region, model: modelIdentity, raster: getPngRasterScaleMultiplier(),
+    versions: [MODULE_SEMANTIC_SCHEMA_VERSION, MODULE_SEMANTIC_NODE_FACT_VERSION, MODULE_SEMANTIC_SEMANTIC_PASS_VERSION, MODULE_SEMANTIC_TEXT_STYLE_PASS_VERSION, MODULE_REFERENCE_RENDER_VERSION] });
+};
+
 const createModuleSemanticDraft = async ({
   module,
   moduleDir,
@@ -935,22 +964,16 @@ const createModuleSemanticDraft = async ({
   scale,
 }: CreateModuleSemanticDraftInput): Promise<CreateModuleSemanticDraftResult> => {
   const jsonPath = path.join(moduleDir, "module-semantic.json");
-  if (await isUpToDate({ outputPath: jsonPath, sourcePath: moduleSvgPath })) {
-    try {
-      const existing = JSON.parse(await readFile(jsonPath, "utf8")) as unknown;
-      if (hasCurrentSemanticDocument(existing)) {
-        return {
-          document: existing,
-          jsonPath,
-          sourceImagePath: path.join(
-            moduleDir,
-            existing.sourceImage.path.replaceAll("/", path.sep),
-          ),
-        };
-      }
-    } catch {
-      // Corrupt cache files are regenerated below.
-    }
+  const sourceFingerprint = await moduleSemanticFingerprint({ module, moduleSvgPath, scale });
+  const current = await readCache<ModuleSemanticDocument>(jsonPath);
+  for (const candidatePath of [jsonPath, path.join(moduleDir, 'module-semantic.debug.json')]) {
+    const existing = await readCache<unknown>(candidatePath);
+    if (!hasCurrentSemanticDocument(existing) || existing.runtime.sourceFingerprint !== sourceFingerprint) continue;
+    const sourceImagePath = path.join(moduleDir, existing.sourceImage.path.replaceAll('/', path.sep));
+    if (!await stat(sourceImagePath).then(() => true, () => false)) continue;
+    const document = { ...existing, generatedAssets: current?.generatedAssets ?? existing.generatedAssets };
+    if (candidatePath !== jsonPath) await writeJsonFile(jsonPath, document);
+    return { document, jsonPath, sourceImagePath };
   }
 
   const [{ height, sourceImagePath, width }, svgMarkup] = await Promise.all([
@@ -1017,6 +1040,7 @@ const createModuleSemanticDraft = async ({
       siblingIndex: node.siblingIndex,
       tag: node.tag,
       textContent: node.textContent,
+      nativeTextLines: node.textLines,
       viewBoxBox: node.viewBoxBox ?? undefined,
       visible: Boolean(bbox),
       ...(visibleBox ? { visibleBox } : {}),
@@ -1037,6 +1061,7 @@ const createModuleSemanticDraft = async ({
     nodes,
     runtime: {
       completedStages: ["node-facts", "reference-image"],
+      sourceFingerprint,
       nodeFactVersion: MODULE_SEMANTIC_NODE_FACT_VERSION,
       referenceRenderVersion: MODULE_REFERENCE_RENDER_VERSION,
       schemaVersion: MODULE_SEMANTIC_SCHEMA_VERSION,
@@ -1074,6 +1099,27 @@ const readModuleSemanticDocument = async (
   } catch {
     return null;
   }
+};
+
+const isModuleSemanticInputCurrent = async ({ moduleDir, moduleSvgPath, module, scale }: {
+  moduleDir: string; moduleSvgPath: string; module: SvgVerticalModule; scale: number;
+}) => {
+  const jsonPath = path.join(moduleDir, 'module-semantic.json');
+  const current = await readCache<Record<string, unknown>>(jsonPath);
+  if (!current) return false;
+  const expected = await moduleSemanticFingerprint({ module, moduleSvgPath, scale });
+  for (const outputPath of [jsonPath, path.join(moduleDir, 'module-semantic.debug.json')]) {
+    const document = await readCache<unknown>(outputPath);
+    if (!hasCurrentSemanticDocument(document) || document.runtime.sourceFingerprint !== expected) continue;
+    if (outputPath !== jsonPath) {
+      const projected = compactDocumentForAgent(document);
+      if (['module', 'nodes', 'textBlocks', 'sourceImage'].some(key =>
+        JSON.stringify(current[key]) !== JSON.stringify((projected as unknown as Record<string, unknown>)[key]))) continue;
+    }
+    if (!['text-blocks', 'text-style-inference', TEXT_PAINT_OPACITY_STAGE].every(stage => document.runtime.completedStages.includes(stage))) continue;
+    if (await stat(path.join(moduleDir, document.sourceImage.path)).then(() => true, () => false)) return true;
+  }
+  return false;
 };
 
 // Attrs whitelist for agent-facing compact output. Only fields that provide
@@ -1248,8 +1294,10 @@ const compactDocumentForAgent = <
   delete result.graphicAssets;
   delete result.summaryVersion;
 
-  // Compact textBlocks: keep only {id, text,
-  // layoutTargetRegion, styleInference}. Verified across 8 modules / 48 blocks:
+  // Keep native multiline geometry so the agent preserves SVG line breaks
+  // and spacing even when the font metrics differ from the source.
+  // Compact textBlocks: keep {id, text, layoutTargetRegion, styleInference}
+  // plus multiline geometry. Verified across 8 modules / 48 blocks:
   // region==textRegion, renderedTextRegion==layoutTargetRegion,
   // sourceBlockText==text, sourceBlockId==id (all 100% identical, 0 refs).
   if (Array.isArray(result.textBlocks)) {
@@ -1258,6 +1306,12 @@ const compactDocumentForAgent = <
         const compacted: Record<string, unknown> = {
           id: block.id,
           text: block.text,
+          ...(typeof block.lineCount === "number" && block.lineCount > 1
+            ? { lineCount: block.lineCount }
+            : {}),
+          ...(block.lineRegions && block.lineRegions.length > 1
+            ? { lineRegions: block.lineRegions }
+            : {}),
           ...(block.styleInference
             ? { styleInference: block.styleInference }
             : {}),
@@ -1447,6 +1501,7 @@ const buildModuleSemanticTextHints = (
           color,
           id: node.id,
           lineCount: node.semantic.lineCount,
+          lineRegions: node.semantic.lineRegions,
           lines: node.semantic.visualLines,
           role: node.semantic.textKind ?? node.semantic.kind,
           text,
@@ -1463,7 +1518,7 @@ const readModuleAllowedAssets = async (
   return normalizeSemanticGeneratedAssets(document);
 };
 
-export { createModuleSemanticDraft, ensureModuleContextImages, ensureModuleReferenceImage };
+export { createModuleSemanticDraft, ensureModuleContextImages, ensureModuleReferenceImage, isModuleSemanticInputCurrent };
 export type {
   ModuleSemanticAnalysisSheet,
   ModuleSemanticDocument,

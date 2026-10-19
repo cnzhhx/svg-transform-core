@@ -17,6 +17,7 @@ import type { SvgVerticalModule } from "../../../core/svg-vertical-modules/types
 import type { ResolvedSvgDesign } from "../../../core/design-resolve.js";
 import { isRecord } from "../../../core/type-guards.js";
 import { writeJsonFile } from "../../../core/file-io.js";
+import { TEXT_PAINT_OPACITY_STAGE } from "./module-semantic-paint.js";
 import {
   compactDocumentForAgent,
   type ModuleSemanticNode,
@@ -1225,9 +1226,9 @@ const writeModuleSemanticPayload = async ({
       : [],
   );
   completedStages.add("input-summary");
-  if (semanticTextBlocks.length) completedStages.add("text-blocks");
-  if (textStyleSummary.length) {
-    completedStages.add("text-paint-opacity-v2");
+  completedStages.add("text-blocks");
+  if (textStyleSummary.length || semanticTextBlocks.length === 0) {
+    completedStages.add(TEXT_PAINT_OPACITY_STAGE);
     completedStages.add("text-style-inference");
   }
   let nextPayload: Record<string, unknown> = {
