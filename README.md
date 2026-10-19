@@ -4,7 +4,7 @@ Core SVG transform service plus a lightweight HTTP client SDK.
 
 Published artifacts:
 
-- Docker image: `ghcr.io/cnzhhx/svg-transform-core:0.2.1`
+- Docker image: `ghcr.io/cnzhhx/svg-transform-core:0.2.2`
 - npm SDK: `@svg-transform/core-client`
 
 The service is intentionally core-only. It does not include account systems,
@@ -47,7 +47,7 @@ docker run -d \
   -e MAX_PARALLEL_MODULE_AGENTS=5 \
   -v "$PWD/workspace:/app/workspace" \
   -v "$PWD/.runtime/model-provider.json:/app/config/model-provider.json:ro" \
-  ghcr.io/cnzhhx/svg-transform-core:0.2.1
+  ghcr.io/cnzhhx/svg-transform-core:0.2.2
 ```
 
 The service has no built-in authentication. Keep the default loopback binding
@@ -226,7 +226,7 @@ EOF
 Pull the published image:
 
 ```bash
-docker pull ghcr.io/cnzhhx/svg-transform-core:0.2.1
+docker pull ghcr.io/cnzhhx/svg-transform-core:0.2.2
 ```
 
 The `latest` tag is also updated on stable version releases:
@@ -241,7 +241,7 @@ container:
 ```bash
 mkdir -p .runtime
 cp apps/server/config/model-provider.example.json .runtime/model-provider.json
-SVG_TRANSFORM_CORE_IMAGE=ghcr.io/cnzhhx/svg-transform-core:0.2.1 pnpm docker:recreate
+SVG_TRANSFORM_CORE_IMAGE=ghcr.io/cnzhhx/svg-transform-core:0.2.2 pnpm docker:recreate
 ```
 
 Useful helper commands:
