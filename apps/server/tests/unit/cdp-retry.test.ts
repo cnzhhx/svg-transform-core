@@ -2,12 +2,13 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import { createServer } from "node:http";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { describe, it, type TestContext } from "node:test";
 import { WebSocketServer, type WebSocket } from "ws";
 import { capturePage, evaluatePage, withCdpSignal, withCdpOperationSlot } from "../../src/core/cdp.js";
-import { setTimeout as delay } from 'node:timers/promises';
+import timers, { setTimeout as delay } from 'node:timers/promises';
 
 type Command = { id: number; method: string; params: Record<string, unknown> };
 type Reply = { result?: unknown; error?: { message: string } };
@@ -187,24 +188,42 @@ describe("CDP page timeout recovery", () => {
     assert.deepEqual(fixture.closed, [1, 2, 3]);
   });
 
-  it("lets another session finish while a timed-out operation backs off", async (t) => {
-    let notifyStarted!: () => void;
-    const started = new Promise<void>((resolve) => { notifyStarted = resolve; });
+  it("lets another session finish while a timed-out operation backs off", { timeout: 30_000 }, async (t) => {
+    let notifyBackoff!: () => void;
+    let releaseBackoff!: () => void;
+    const backingOff = new Promise<void>((resolve) => { notifyBackoff = resolve; });
+    const backoffGate = new Promise<void>((resolve) => { releaseBackoff = resolve; });
+    const originalDelay = timers.setTimeout;
+    const controlledDelay: typeof delay = <T = void>(milliseconds?: number, value?: T, options?: Parameters<typeof delay>[2]) => {
+      if (milliseconds !== undefined && milliseconds >= 1000 && milliseconds < 1250) {
+        notifyBackoff();
+        return backoffGate.then(() => value as T);
+      }
+      return originalDelay<T>(milliseconds, value, options);
+    };
+    const mockedDelay = t.mock.method(timers, 'setTimeout', controlledDelay);
+    syncBuiltinESMExports();
+    t.after(() => { mockedDelay.mock.restore(); syncBuiltinESMExports(); });
     const fixture = await browserFixture(t, (command, target) => {
       if (command.params.expression === "window.__TEST_RESULT__") {
-        if (target === 1) {
-          notifyStarted();
-          return undefined;
-        }
+        if (target === 1) return undefined;
         return { result: { result: { value: target } } };
       }
       return success(command);
     });
-    const recovering = evaluatePage(fixture.options);
-    await started;
-    const concurrent = evaluatePage(fixture.options);
-    const [recoveredResult, concurrentResult] = await Promise.all([recovering, concurrent]);
-    assert.equal(concurrentResult, 2);
+    const recovering = evaluatePage({ ...fixture.options, signal: t.signal });
+    let recoveredResult: unknown;
+    try {
+      await backingOff;
+      // Other test processes share the file lease. Keep this retry paused until
+      // the concurrent operation finishes, regardless of host scheduling.
+      const concurrentResult = await evaluatePage({ ...fixture.options, signal: t.signal });
+      assert.equal(concurrentResult, 2);
+      assert.deepEqual(fixture.closed, [1, 2]);
+    } finally {
+      releaseBackoff();
+      recoveredResult = await recovering;
+    }
     assert.equal(recoveredResult, 3);
     assert.deepEqual(fixture.closed, [1, 2, 3]);
   });
