@@ -337,6 +337,7 @@ const renderDesignTargets = async (
   const browser = await launchEdge();
   let renderImageErrors: HtmlImageError[] = [];
   let sourceImageErrors: HtmlImageError[] = [];
+  let renderedText: import('./text-diagnostics.js').TextBox[] = [];
 
   try {
     await capturePage({
@@ -371,14 +372,32 @@ const renderDesignTargets = async (
       viewportWidth: design.width,
     });
 
-    renderImageErrors = await evaluatePage<HtmlImageError[]>({
+    const renderDiagnostics = await evaluatePage<{ images: HtmlImageError[]; text: import('./text-diagnostics.js').TextBox[] }>({
       deviceScaleFactor: design.scale,
-      expression: "window.__RENDER_IMAGE_ERRORS__ ?? []",
+      expression: `(() => {
+        const doc = document.getElementById('source')?.contentDocument;
+        const text = [];
+        if (doc?.body) {
+          const walker = doc.createTreeWalker(doc.body, NodeFilter.SHOW_TEXT);
+          let node;
+          while ((node = walker.nextNode()) && text.length < 10000) {
+            if (!node.textContent.trim() || /^(SCRIPT|STYLE|NOSCRIPT)$/.test(node.parentElement?.tagName)) continue;
+            const style = doc.defaultView.getComputedStyle(node.parentElement);
+            if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) continue;
+            const range = doc.createRange(); range.selectNodeContents(node);
+            const box = range.getBoundingClientRect();
+            if (box.width && box.height) text.push({ text: node.textContent.trim(), x: box.x, y: box.y, width: box.width, height: box.height });
+          }
+        }
+        return { images: window.__RENDER_IMAGE_ERRORS__ ?? [], text };
+      })()`,
       port: browser.port,
       url: `${server.origin}${toUrlPath(renderWrapperPath)}`,
       viewportHeight: design.height,
       viewportWidth: design.width,
     });
+    renderImageErrors = renderDiagnostics.images;
+    renderedText = renderDiagnostics.text;
   } finally {
     await Promise.all([
       Promise.race([
@@ -396,6 +415,7 @@ const renderDesignTargets = async (
     designName: design.designName,
     height: design.height,
     renderImageErrors,
+    renderedText,
     renderImageIntegrityPassed: renderImageErrors.length === 0,
     renderIntegrityIssues,
     renderIntegrityPassed: renderIntegrityIssues.length === 0,

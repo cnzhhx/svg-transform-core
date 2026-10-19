@@ -1,5 +1,7 @@
 import type { ModuleSemanticNode } from "./module-semantic.js";
 
+export const TEXT_PAINT_OPACITY_STAGE = "text-paint-opacity-v3";
+
 const parseNumericAttr = (value: string | undefined) => {
   if (!value) return undefined;
   const parsed = Number(value.trim());

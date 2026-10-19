@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, rm, stat } from "node:fs/promises";
 import path from "node:path";
+import { resourcePool } from './resources.js';
 
 import { writeTextFile } from "./file-io.js";
 
@@ -208,7 +209,7 @@ const buildFlutterWeb = async ({
   if (signal?.aborted) throw new Error("Flutter web build aborted");
   await rm(outputDir, { force: true, recursive: true });
   await mkdir(path.dirname(outputDir), { recursive: true });
-  await runFlutterCommand({
+  await resourcePool('build').run(() => runFlutterCommand({
     args: [
       "build",
       "web",
@@ -220,7 +221,7 @@ const buildFlutterWeb = async ({
     ],
     projectDir,
     signal,
-  });
+  }), signal);
   return path.join(outputDir, "index.html");
 };
 

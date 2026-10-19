@@ -38,8 +38,15 @@ Promise.all([loadImage(svgUrl), loadImage(renderUrl)]).then(([svgImage, renderIm
 
   const quantize = (value) => Math.floor(value / 4) * 4
   let diffPixels = 0
+  const gridSize = 8
+  const regions = Array.from({ length: gridSize * gridSize }, (_, i) => ({
+    column: i % gridSize, row: Math.floor(i / gridSize), diffPixels: 0, totalPixels: 0,
+  }))
 
   for (let index = 0; index < sourceImage.data.length; index += 4) {
+    const pixel = index / 4
+    const region = regions[Math.min(gridSize - 1, Math.floor(Math.floor(pixel / width) * gridSize / height)) * gridSize + Math.min(gridSize - 1, Math.floor((pixel % width) * gridSize / width))]
+    region.totalPixels++
     const srcR = quantize(sourceImage.data[index])
     const srcG = quantize(sourceImage.data[index + 1])
     const srcB = quantize(sourceImage.data[index + 2])
@@ -59,6 +66,7 @@ Promise.all([loadImage(svgUrl), loadImage(renderUrl)]).then(([svgImage, renderIm
     if (channelDelta <= threshold) continue
 
     diffPixels += 1
+    region.diffPixels++
 
     diffImage.data[index] = 255
     diffImage.data[index + 1] = Math.min(255, totalChannelDelta)

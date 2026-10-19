@@ -1,5 +1,6 @@
 import { readFile, rm } from "node:fs/promises";
 import path from "node:path";
+import { cachedModuleVerification, saveModuleCandidate, candidateContext } from '../../../core/artifact-cache.js';
 
 import {
   buildFrameworkProject,
@@ -279,7 +280,7 @@ const verifyModuleFlutterLocal = async ({
   };
 };
 
-export const verifyModuleFrameworkLocal = async ({
+const verifyModuleFrameworkLocalUncached = async ({
   design,
   module,
   moduleDir,
@@ -486,4 +487,18 @@ export const verifyModuleFrameworkLocal = async ({
     renderPngPath: result.renderPngPath,
     svgPngPath: result.svgPngPath,
   };
+};
+
+export const verifyModuleFrameworkLocal = async (input: Parameters<typeof verifyModuleFrameworkLocalUncached>[0]) => {
+  const result = await cachedModuleVerification({
+    moduleDir: input.moduleDir, kind: input.outputFormat ?? 'framework',
+    extras: [input.moduleSvgPath],
+    context: { module: input.module, design: input.design, format: input.outputFormat },
+    signal: input.signal, onProgress: input.onProgress,
+    run: () => verifyModuleFrameworkLocalUncached(input),
+  });
+  if (result?.renderEntryPath) input.onRenderEntryReady?.(result.renderEntryPath);
+  if (result && !result.buildError) await saveModuleCandidate(input.moduleDir, result.diffRatio,
+    await candidateContext(input.moduleDir, input.outputFormat ?? 'framework'));
+  return result;
 };

@@ -85,6 +85,7 @@ const inferTextStyles = async ({
   deviceScaleFactor?: number;
   targetImagePath?: string;
 }) => {
+  if (!blocks.length) return [];
   const browser = await launchEdge();
   const htmlUrl = pathToFileURL(process.cwd()).href;
   const targetImageUrl = targetImagePath ? pathToFileURL(targetImagePath).href : undefined;
@@ -92,6 +93,8 @@ const inferTextStyles = async ({
   try {
     return await evaluatePage<TextStyleInferenceRecommendation[]>({
       deviceScaleFactor,
+      evaluateTimeoutMs: 300_000,
+      maxRetries: 2,
       expression: `(async () => {
         const blocks = ${JSON.stringify(
           blocks.map((block) => ({
@@ -144,7 +147,7 @@ const inferTextStyles = async ({
           typeof block.renderScale === 'number' && Number.isFinite(block.renderScale) && block.renderScale > 0
             ? block.renderScale
             : 1;
-        const styleHeightTargets = blocks.map((block) => block.region.height);
+        const styleHeightTargets = ${JSON.stringify(blocks.map((block) => block.region.height))};
         const clusteredStyleHeight = (height) => {
           const peers = styleHeightTargets.filter((candidate) => Math.abs(candidate - height) <= 1);
           return peers.length >= 2 ? Math.max(...peers) : height;
@@ -276,6 +279,20 @@ const inferTextStyles = async ({
             return values[Math.floor(values.length / 2)] ?? bg[channel];
           };
           const fg = [foregroundMedian(0), foregroundMedian(1), foregroundMedian(2)];
+          // For each candidate alpha, the RGB distance is a quadratic in alpha.
+          // Precompute its coefficients once instead of calling Math.hypot for
+          // every pixel of every font candidate and alignment offset.
+          const colorBase = new Float64Array(width * height);
+          const colorSlope = new Float64Array(width * height);
+          const foregroundDelta = fg.map((channel, index) => channel - bg[index]);
+          const colorCurve = foregroundDelta.reduce((sum, value) => sum + value * value, 0);
+          for (let index = 0; index < colorBase.length; index += 1) {
+            const r = bg[0] - data[index * 4];
+            const g = bg[1] - data[index * 4 + 1];
+            const b = bg[2] - data[index * 4 + 2];
+            colorBase[index] = r * r + g * g + b * b;
+            colorSlope[index] = 2 * (r * foregroundDelta[0] + g * foregroundDelta[1] + b * foregroundDelta[2]);
+          }
           const foregroundDistance =
             Math.hypot(fg[0] - bg[0], fg[1] - bg[1], fg[2] - bg[2]) /
             visualSimilarityProfile.channelMaxDistance;
@@ -289,6 +306,9 @@ const inferTextStyles = async ({
             : 0;
           return {
             bg,
+            colorBase,
+            colorCurve,
+            colorSlope,
             data,
             fg,
             foregroundDistance,
@@ -300,13 +320,18 @@ const inferTextStyles = async ({
             width,
           };
         };
+        // Reuse one surface. Thousands of short-lived canvases otherwise keep
+        // native image buffers alive while the renderer is busy evaluating.
+        const renderCanvas = document.createElement('canvas');
+        const renderCtx = renderCanvas.getContext('2d', { willReadFrequently: true });
         const renderCandidate = ({ family, fontSize, fontWeight, height, lineHeight, lines, text, width }) => {
-          const renderCanvas = document.createElement('canvas');
-          renderCanvas.width = width;
-          renderCanvas.height = height;
-          const renderCtx = renderCanvas.getContext('2d', { willReadFrequently: true });
           if (!renderCtx) return null;
-          renderCtx.clearRect(0, 0, width, height);
+          const padding = visualSimilarityProfile.maxAlignmentShiftPx;
+          const rasterWidth = width + padding * 2;
+          const rasterHeight = height + padding * 2;
+          if (renderCanvas.width !== rasterWidth) renderCanvas.width = rasterWidth;
+          if (renderCanvas.height !== rasterHeight) renderCanvas.height = rasterHeight;
+          renderCtx.clearRect(0, 0, rasterWidth, rasterHeight);
           renderCtx.fillStyle = '#000';
           renderCtx.font = fontWeight + ' ' + fontSize + 'px ' + family;
           renderCtx.textBaseline = 'alphabetic';
@@ -330,35 +355,23 @@ const inferTextStyles = async ({
           const measuredHeight = renderLines.length > 1
             ? Math.max(1, Number(lineHeight ?? maxLineHeight) * (renderLines.length - 1) + maxLineHeight)
             : maxLineHeight;
-          const alphaFromImage = () => {
-            const data = renderCtx.getImageData(0, 0, width, height).data;
-            const alpha = new Float32Array(width * height);
-            let ink = 0;
-            for (let index = 0; index < alpha.length; index += 1) {
-              const value = data[index * 4 + 3] / 255;
-              alpha[index] = value;
-              ink += value;
-            }
-            return { alpha, height: measuredHeight, ink, width: measuredWidth };
-          };
-          const drawText = (offsetX, offsetY) => {
-            renderCtx.clearRect(0, 0, width, height);
-            lineMetrics.forEach((metrics, index) => {
-              renderCtx.fillText(
-                metrics.text,
-                offsetX - metrics.left,
-                offsetY + metrics.ascent + Number(lineHeight ?? maxLineHeight) * index,
-              );
-            });
-            return alphaFromImage();
-          };
-          return { drawText, measuredHeight, measuredWidth };
+          const baseX = Math.round((width - measuredWidth) / 2);
+          const baseY = Math.round((height - measuredHeight) / 2);
+          lineMetrics.forEach((metrics, index) => {
+            renderCtx.fillText(
+              metrics.text,
+              padding + baseX - metrics.left,
+              padding + baseY + metrics.ascent + Number(lineHeight ?? maxLineHeight) * index,
+            );
+          });
+          const data = renderCtx.getImageData(0, 0, rasterWidth, rasterHeight).data;
+          const alpha = new Float32Array(rasterWidth * rasterHeight);
+          for (let index = 0; index < alpha.length; index += 1) alpha[index] = data[index * 4 + 3] / 255;
+          return { alpha, measuredHeight, measuredWidth, padding, rasterWidth };
         };
         const compareVisual = (targetCrop, candidateFactory) => {
           if (!targetCrop || !candidateFactory) return null;
           let best = null;
-          const baseX = Math.round((targetCrop.width - candidateFactory.measuredWidth) / 2);
-          const baseY = Math.round((targetCrop.height - candidateFactory.measuredHeight) / 2);
           for (
             let dy = -visualSimilarityProfile.maxAlignmentShiftPx;
             dy <= visualSimilarityProfile.maxAlignmentShiftPx;
@@ -369,28 +382,23 @@ const inferTextStyles = async ({
               dx <= visualSimilarityProfile.maxAlignmentShiftPx;
               dx += 1
             ) {
-              const candidate = candidateFactory.drawText(baseX + dx, baseY + dy);
               let intersection = 0;
               let union = 0;
               let colorError = 0;
+              let ink = 0;
+              let rasterIndex = (candidateFactory.padding - dy) * candidateFactory.rasterWidth + candidateFactory.padding - dx;
               for (let index = 0; index < targetCrop.mask.length; index += 1) {
+                if (index > 0 && index % targetCrop.width === 0) rasterIndex += candidateFactory.rasterWidth - targetCrop.width;
+                const alpha = candidateFactory.alpha[rasterIndex++];
                 const targetOn = targetCrop.mask[index] === 1;
-                const candidateOn = candidate.alpha[index] > visualSimilarityProfile.candidateAlphaThreshold;
+                const candidateOn = alpha > visualSimilarityProfile.candidateAlphaThreshold;
                 if (targetOn && candidateOn) intersection += 1;
                 if (targetOn || candidateOn) union += 1;
-                const alpha = candidate.alpha[index];
-                const dataIndex = index * 4;
-                const r = targetCrop.bg[0] + (targetCrop.fg[0] - targetCrop.bg[0]) * alpha;
-                const g = targetCrop.bg[1] + (targetCrop.fg[1] - targetCrop.bg[1]) * alpha;
-                const b = targetCrop.bg[2] + (targetCrop.fg[2] - targetCrop.bg[2]) * alpha;
-                colorError += Math.hypot(
-                  r - targetCrop.data[dataIndex],
-                  g - targetCrop.data[dataIndex + 1],
-                  b - targetCrop.data[dataIndex + 2],
-                ) / visualSimilarityProfile.channelMaxDistance;
+                ink += alpha;
+                colorError += Math.sqrt(Math.max(0, targetCrop.colorBase[index] + alpha * targetCrop.colorSlope[index] + alpha * alpha * targetCrop.colorCurve)) / visualSimilarityProfile.channelMaxDistance;
               }
               const iou = union ? intersection / union : 0;
-              const densityDelta = Math.abs(candidate.ink - targetCrop.ink) / Math.max(1, targetCrop.ink);
+              const densityDelta = Math.abs(ink - targetCrop.ink) / Math.max(1, targetCrop.ink);
               const widthDelta = Math.abs(candidateFactory.measuredWidth - targetCrop.width) / Math.max(1, targetCrop.width);
               const heightDelta = Math.abs(candidateFactory.measuredHeight - targetCrop.height) / Math.max(1, targetCrop.height);
               const score =
@@ -740,6 +748,7 @@ const inferTextStyles = async ({
               text,
               region: target,
               declarations: {
+                ...(currentColor ? { 'color': currentColor } : {}),
                 'font-family': families[0] ?? 'sans-serif',
                 'font-size': fallbackSize + 'px',
                 'font-weight': String(weights[0] ?? '400'),

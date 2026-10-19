@@ -1,5 +1,11 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { CONVERSION_CACHE_VERSION } from '../../../core/conversion-version.js';
+import { withCdpSignal } from '../../../core/cdp.js';
+import { withAgentProcessScope } from "../../agent-runtime/process-lifecycle.js";
+import { assertRuntimeReady } from '../../../core/readiness.js';
+import { prepareDeliverable } from '../../deliverables.js';
+import { fingerprintFiles, readCache } from '../../../core/artifact-cache.js';
 
 import { getDiffRatioThreshold } from "../../../config/index.js";
 import { resolveDesignTarget } from "../../../core/design-resolve.js";
@@ -12,7 +18,7 @@ import {
 } from "../module/module-pipeline-v2.js";
 import { prepareStructuredSessionInputs } from "./preflight.js";
 import { isAbortError, throwIfRunAborted } from "./run-control.js";
-import { buildQualityAssessment } from "../verify/verify-gates.js";
+import { buildQualityAssessment, qualityCompletionStatus } from "../verify/verify-gates.js";
 
 import type { VerifyResult } from "../../verify.js";
 
@@ -86,10 +92,15 @@ const runSelectedModuleRevisionPipeline = async ({
     userInstructions,
   });
   throwIfRunAborted(controller);
+  sessionStore.acknowledgeModuleMessages(sessionId, moduleId);
   return result;
 };
 
 const dequeueAllPendingUserMessages = (sessionId: string) => {
+  const first = sessionStore.get(sessionId)?.pendingUserMessages[0];
+  if (first && typeof first !== 'string' && first.moduleId) {
+    return sessionStore.dequeuePendingMessagesForModule(sessionId, first.moduleId);
+  }
   const messages: PendingUserInstruction[] = [];
   for (;;) {
     const next = sessionStore.dequeuePendingMessage(sessionId);
@@ -99,7 +110,7 @@ const dequeueAllPendingUserMessages = (sessionId: string) => {
   return messages;
 };
 
-const runSession = async (sessionId: string, controller: AbortController) => {
+const runSessionPipeline = async (sessionId: string, controller: AbortController) => {
   const session = sessionStore.get(sessionId);
   if (!session) return;
   return withModelUsageContext({
@@ -115,6 +126,7 @@ const runSession = async (sessionId: string, controller: AbortController) => {
     });
 
     try {
+      await assertRuntimeReady(session.outputFormat, session.model);
       const pendingUserMessages = dequeueAllPendingUserMessages(sessionId);
       const userInstructions = pendingUserMessages
         .map((message, index) => `用户补充 ${index + 1}: ${message.text}`)
@@ -144,10 +156,10 @@ const runSession = async (sessionId: string, controller: AbortController) => {
         scale: session.scale ?? 1,
       });
 
-      const preflightReady = Boolean(
-        session.result.containerLayoutPath &&
-          session.result.modulePlanPath,
-      );
+      const checkpoint = await readCache<{ signature: string; requiredFiles: string[] }>(path.join(session.artifactDir, '.preflight.json'));
+      const preflightReady = Boolean(checkpoint && checkpoint.signature === await fingerprintFiles([session.svgPath], {
+        outputFormat: session.outputFormat, scale: design.scale, model: session.model, version: CONVERSION_CACHE_VERSION,
+      }) && checkpoint.requiredFiles.every((file) => existsSync(file)) && session.result.modulePlanPath);
 
       if (!preflightReady) {
         const prepared = await prepareStructuredSessionInputs({
@@ -232,6 +244,7 @@ const runSession = async (sessionId: string, controller: AbortController) => {
 
       const qualityAssessment = buildQualityAssessment(verifyResult, {
         diffRatioThreshold: getDiffRatioThreshold(),
+        failedModuleIds,
       });
       const currentSessionBeforeComplete = sessionStore.get(sessionId);
       if (currentSessionBeforeComplete) {
@@ -244,6 +257,7 @@ const runSession = async (sessionId: string, controller: AbortController) => {
             moduleMergeManifestPath: pipelineResult.moduleMergeManifestPath,
             moduleValidationRuns: pipelineResult.moduleValidationRuns,
             diffRatio: verifyResult.diffRatio,
+            quality: qualityAssessment,
           },
         });
       }
@@ -252,17 +266,24 @@ const runSession = async (sessionId: string, controller: AbortController) => {
         sessionId,
         `[pipeline] complete: quality=${qualityAssessment.status}, final diffRatio=${(verifyResult.diffRatio * 100).toFixed(2)}%${qualityAssessment.softIssues.length ? `, notes=${qualityAssessment.softIssues.join("; ")}` : ""}`,
       );
+      const ready = sessionStore.get(sessionId);
+      if (!ready) return;
+      const deliverable = await prepareDeliverable(ready);
+      throwIfRunAborted(controller);
+      sessionStore.update(sessionId, { result: { ...ready.result, deliverable, recovering: false } });
       sessionStore.addLog(sessionId, "[pipeline] artifacts ready");
       const completionDetail = "执行完成";
       sessionStore.completePipeline(sessionId, {
         detail: completionDetail,
-        status: "completed",
+        status: qualityCompletionStatus(qualityAssessment, process.env["QUALITY_POLICY"]),
       });
+      await sessionStore.flushSessionWrites(sessionId);
     } catch (error) {
       if (isAbortError(error) && controller.signal.aborted) {
         return;
       }
 
+      controller.abort(error);
       const message = error instanceof Error ? error.message : String(error);
       const current = sessionStore.get(sessionId);
       const currentStep = current?.activeStep;
@@ -278,5 +299,8 @@ const runSession = async (sessionId: string, controller: AbortController) => {
     }
   });
 };
+
+const runSession = (sessionId: string, controller: AbortController) =>
+  withCdpSignal(controller.signal, () => withAgentProcessScope(controller, () => runSessionPipeline(sessionId, controller)));
 
 export { runSession };

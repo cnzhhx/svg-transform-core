@@ -1,5 +1,5 @@
 import path from "node:path";
-import { readdir, unlink } from "node:fs/promises";
+import { DEFAULT_MODEL_RETRIES, normalizeModelRetries } from "../../pipeline/model-retry.js";
 
 import { createContainerLayoutReport } from "../container-layout/entry.js";
 import {
@@ -29,29 +29,12 @@ import type {
   SvgVerticalModuleReport,
 } from "./types.js";
 
-const DEFAULT_PLANNER_RETRIES = 2;
-
 const createPlannerConstraints = () => ({
   avoidSplittingCardsOrRepeatedItems: true,
   avoidSplittingVisibleText: true,
   preferSemanticSections: true,
   smallDecorationsBelongToNearestModule: true,
 });
-
-const clearPlannerArtifacts = async (moduleDir: string) => {
-  let entries: string[];
-  try {
-    entries = await readdir(moduleDir);
-  } catch {
-    return;
-  }
-
-  await Promise.allSettled(
-    entries
-      .filter((entry) => entry.startsWith("planner-"))
-      .map((entry) => unlink(path.join(moduleDir, entry))),
-  );
-};
 
 const createAdaptiveModulePlan = async ({
   artifactDir: customArtifactDir,
@@ -60,9 +43,10 @@ const createAdaptiveModulePlan = async ({
   minGap = 10,
   mode: requestedMode = "auto",
   planner: requestedPlanner = "auto",
-  plannerRetries = DEFAULT_PLANNER_RETRIES,
+  plannerRetries = DEFAULT_MODEL_RETRIES,
   scale,
   svgLayoutReport,
+  signal,
 }: CreateAdaptiveModulePlanOptions): Promise<SvgVerticalModuleArtifacts> => {
   const design = await resolveSvgDesign(inputPath, { scale });
   const artifactDir = await resolveArtifactDir(
@@ -70,7 +54,7 @@ const createAdaptiveModulePlan = async ({
     customArtifactDir,
   );
   const moduleDir = path.join(artifactDir, "modules");
-  await clearPlannerArtifacts(moduleDir);
+  signal?.throwIfAborted();
   const viewport: Box = {
     height: design.height,
     width: design.width,
@@ -78,7 +62,7 @@ const createAdaptiveModulePlan = async ({
     y: 0,
   };
   const warnings: string[] = [];
-  const safePlannerRetries = Math.max(0, Math.floor(plannerRetries));
+  const safePlannerRetries = normalizeModelRetries(plannerRetries);
   const plannerConstraints = createPlannerConstraints();
 
   let svgLayout = svgLayoutReport;
@@ -152,6 +136,7 @@ const createAdaptiveModulePlan = async ({
       previewImages[0]?.imagePath ?? path.join(artifactDir, "svg.png");
 
     const modelResult = await runModelPlanner({
+      signal,
       artifactDir,
       constraints: plannerConstraints,
       containerLayout,
@@ -181,69 +166,12 @@ const createAdaptiveModulePlan = async ({
         validation: toValidationSummary(modelResult.validation),
       };
     } else {
-      // First attempt failed — retry the entire planner once more
-      warnings.push(
-        `[planner-retry] First planner round failed: ${modelResult.failureReason}. Retrying...`,
-      );
-      await writeJsonFile(path.join(moduleDir, "planner-failure-attempt-1.json"), {
+      await writeJsonFile(path.join(moduleDir, "planner-failure.json"), {
         attemptCount: modelResult.attemptCount,
         reason: modelResult.failureReason,
-        requestedPlanner,
-        validation: modelResult.validation
-          ? toValidationSummary(modelResult.validation)
-          : undefined,
+        validation: modelResult.validation,
       });
-
-      // Clear planner artifacts before second round
-      await clearPlannerArtifacts(moduleDir);
-
-      const modelRetryResult = await runModelPlanner({
-        artifactDir,
-        constraints: plannerConstraints,
-        containerLayout,
-        design: {
-          height: design.height,
-          name: design.designName,
-          previewImagePath,
-          previewImages,
-          sourceSvgPath: design.svgPath,
-          width: design.width,
-        },
-        mode: requestedMode,
-        moduleDir,
-        plannerRetries: safePlannerRetries,
-        svgLayout,
-        viewport,
-      });
-
-      if (modelRetryResult.status === "success") {
-        planned = modelRetryResult.planned;
-        route = "model";
-        plannerMetadata = {
-          modelAttempted: true,
-          requested: requestedPlanner,
-          retries: safePlannerRetries,
-          selected: "model",
-          validation: toValidationSummary(modelRetryResult.validation),
-        };
-      } else {
-        // Both rounds failed — throw an error instead of falling back to single module
-        await writeJsonFile(path.join(moduleDir, "planner-failure.json"), {
-          attemptCount:
-            modelResult.attemptCount + modelRetryResult.attemptCount,
-          reason: modelRetryResult.failureReason,
-          requestedPlanner,
-          retriedOnce: true,
-          validation: modelRetryResult.validation
-            ? toValidationSummary(modelRetryResult.validation)
-            : undefined,
-        });
-
-        throw new Error(
-          `Module planner failed after 2 full rounds (${modelResult.attemptCount + modelRetryResult.attemptCount} total attempts). ` +
-            `Last failure: ${modelRetryResult.failureReason}`,
-        );
-      }
+      throw new Error(`Module planner failed after ${modelResult.attemptCount} attempt(s): ${modelResult.failureReason}`);
     }
   } else {
     const singleReason =

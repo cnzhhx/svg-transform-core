@@ -49,6 +49,7 @@ type SemanticTextHint = {
   confidence?: number;
   id?: string;
   lineCount?: number;
+  lineRegions?: Box[];
   lines?: string[];
   role?: string;
   text?: string;
@@ -81,7 +82,6 @@ const readSvgPaintCandidatesFromDom = async (
   scale?: number,
   port?: number,
 ): Promise<Array<{ box: Box; color: string; opacity?: number }>> => {
-  const safeScale = scale ?? 1;
   const { height, width } = await parseSvgSize(svgPath, scale);
   const svgMarkup = await readFile(svgPath, "utf8");
   const wrapperPath = path.join(
@@ -178,16 +178,10 @@ const readSvgPaintCandidatesFromDom = async (
       viewportHeight: height,
       viewportWidth: width,
     });
-    return candidates.map((candidate) => ({
-      box: {
-        x: Number((candidate.box.x / safeScale).toFixed(3)),
-        y: Number((candidate.box.y / safeScale).toFixed(3)),
-        width: Number((candidate.box.width / safeScale).toFixed(3)),
-        height: Number((candidate.box.height / safeScale).toFixed(3)),
-      },
-      color: candidate.color,
-      ...(typeof candidate.opacity === "number" ? { opacity: candidate.opacity } : {}),
-    }));
+    // The wrapper already uses the scaled SVG dimensions. Client rectangles
+    // share the semantic text blocks' pixel coordinates; scaling again would
+    // match a text block against another element's paint.
+    return candidates;
   } finally {
     if (browser) {
       await browser.close();
@@ -588,8 +582,9 @@ const buildSemanticBlocks = (hints: SemanticTextHint[]) =>
         id: hint.id ?? `semantic-text-${index + 1}`,
         kind: hint.role,
         lineCount: lines.length || hint.lineCount,
+        lineRegions: hint.lineRegions,
         ...(lines.length
-          ? { lines: lines.map((text) => ({ text })) }
+          ? { lines: lines.map((text, index) => ({ text, region: hint.lineRegions?.[index] })) }
           : {}),
         region: hint.bbox,
         source: "semantic",
@@ -631,6 +626,12 @@ const createModuleTextBlocks = async ({
         confidence: getNumber(block["confidence"]),
         id: typeof block["id"] === "string" ? block["id"] : undefined,
         lineCount: getNumber(block["lineCount"]),
+        lineRegions: Array.isArray(block["lineRegions"])
+          ? block["lineRegions"].flatMap((region) => {
+              const box = readBox(region);
+              return box ? [box] : [];
+            })
+          : undefined,
         lines: readSemanticTextLines(block["lines"]),
         role: typeof block["role"] === "string" ? block["role"] : undefined,
         text: typeof block["text"] === "string" ? block["text"] : undefined,

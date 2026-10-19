@@ -1,4 +1,8 @@
 import path from "node:path";
+import { compareTextBoxes, type TextBox } from '../../../core/text-diagnostics.js';
+import { readCache } from '../../../core/artifact-cache.js';
+import { readModuleSemanticDocument } from './module-semantic.js';
+import { cachedModuleVerification, saveModuleCandidate, candidateContext } from '../../../core/artifact-cache.js';
 import { readFile } from "node:fs/promises";
 
 import { getModuleDiffRatioThreshold } from "../../../config/index.js";
@@ -27,6 +31,7 @@ type ModuleLocalVerifyInput = {
 };
 
 type ModuleLocalVerifyResult = {
+  textDiagnostics?: ReturnType<typeof compareTextBoxes>;
   artifactDir: string;
   diffPngPath: string;
   diffPixels?: number;
@@ -368,7 +373,7 @@ const getModuleSourceHtmlPath = (moduleDir: string, round: number) =>
 const getModuleVerifyArtifactDir = (moduleDir: string, round: number) =>
   path.join(moduleDir, "verify", `round-${round}`);
 
-const verifyModuleLocal = async ({
+const verifyModuleLocalUncached = async ({
   module,
   moduleDir,
   modulePlan,
@@ -475,6 +480,31 @@ const verifyModuleLocal = async ({
     targetHtmlPath: target.targetHtmlPath,
     targetSvgPath: target.targetSvgPath,
   };
+};
+
+const verifyModuleLocal = async (input: ModuleLocalVerifyInput) => {
+  const extras = [input.moduleSvgPath, input.scaffoldHtmlPath,
+    ...(input.modulePlan?.sharedLayers ?? []).map((layer) => {
+      const ref = layer.svgPath ?? layer.relativePath;
+      return ref ? path.resolve(path.dirname(input.modulePlanPath ?? input.scaffoldHtmlPath), ref) : '';
+    }).filter(Boolean)];
+  const result = await cachedModuleVerification({
+    moduleDir: input.moduleDir, kind: 'html', extras,
+    context: { module: input.module, plan: input.modulePlan, scale: input.scale },
+    signal: input.signal, onProgress: input.onProgress,
+    run: () => verifyModuleLocalUncached(input),
+  });
+  input.onRenderEntryReady?.(result.previewHtmlPath);
+  const [semantic, report] = await Promise.all([
+    readModuleSemanticDocument(input.moduleDir),
+    readCache<{ renderedText?: TextBox[] }>(path.join(result.artifactDir, 'render-report.json')),
+  ]);
+  if (semantic && report?.renderedText) result.textDiagnostics = compareTextBoxes(
+    semantic.textBlocks.map((block) => ({ text: block.text, ...block.textRegion })), report.renderedText);
+  if (!input.modulePlan?.outputFormat || input.modulePlan.outputFormat === 'html') {
+    await saveModuleCandidate(input.moduleDir, result.diffRatio, await candidateContext(input.moduleDir, 'html'));
+  }
+  return result;
 };
 
 export { verifyModuleLocal };

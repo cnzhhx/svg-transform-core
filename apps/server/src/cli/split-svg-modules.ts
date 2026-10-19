@@ -8,6 +8,7 @@ import {
   type ModulePlannerMode,
 } from '../core/svg-vertical-modules/index.js'
 import { parseFlagValue } from './cli-utils.js'
+import { DEFAULT_MODEL_RETRIES } from '../pipeline/model-retry.js'
 
 const VALUE_FLAGS = new Set([
   '--artifact-dir',
@@ -70,7 +71,7 @@ const readJsonFlag = async <T>(args: string[], flag: string) => {
 }
 
 const usage =
-  'Usage: pnpm exec tsx src/cli/split-svg-modules.ts 设计稿.svg路径 [--mode auto|single|vertical] [--planner auto|script|model] [--planner-retries 2] [--min-gap 10] [--scale 1|2] [--container-layout artifacts/container-layout.json]'
+  `Usage: pnpm exec tsx src/cli/split-svg-modules.ts 设计稿.svg路径 [--mode auto|single|vertical] [--planner auto|script|model] [--planner-retries ${DEFAULT_MODEL_RETRIES}] [--min-gap 10] [--scale 1|2] [--container-layout artifacts/container-layout.json]`
 
 const main = async () => {
   const args = process.argv.slice(2)
@@ -84,7 +85,7 @@ const main = async () => {
   const planner = parsePlanner(args)
   const plannerRetries = parseNumberFlag({
     args,
-    defaultValue: 2,
+    defaultValue: DEFAULT_MODEL_RETRIES,
     flag: '--planner-retries',
   })
   const artifactDir = parseFlagValue(args, '--artifact-dir')

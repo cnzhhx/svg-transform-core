@@ -46,6 +46,11 @@ type CoreJobMessage = {
 };
 
 type CoreJobResult = Record<string, unknown> & {
+  quality?: { status: 'pass' | 'partial'; softIssues: string[]; blockingIssues: string[]; gateSummary: Record<string, unknown> };
+  stageTimings?: Record<string, number>;
+  deliverable?: { version: string; manifestPath?: string };
+  moduleValidationRuns?: Array<Record<string, unknown>>;
+  diagnosticDownloadUrl?: string;
   downloadUrl?: string;
   fileBaseUrl?: string;
   previewUrl?: string;
@@ -64,6 +69,7 @@ type CoreJob = {
   model: string;
   outputFormat: CoreOutputFormat;
   progress?: CoreWorkflowProgress;
+  persistence?: { errorCount: number; healthy: boolean };
   result: CoreJobResult;
   scale?: number;
   status: CoreJobStatus;
@@ -81,10 +87,12 @@ type CoreJobEvent =
     }
   | {
       jobId: string;
+      job: CoreJob;
       patch?: Partial<CoreJob>;
       timestamp: number;
-      type: "job:updated" | "job:deleted";
+      type: "job:updated";
     }
+  | { jobId: string; timestamp: number; type: 'job:deleted' }
   | {
       [key: string]: unknown;
       jobId?: string;
@@ -123,7 +131,11 @@ type CoreDeleteJobResponse = {
 type CoreClientOptions = {
   baseUrl: string;
   fetch?: FetchLike;
+  headers?: HeadersInit;
+  timeoutMs?: number;
 };
+
+type CoreRequestOptions = { signal?: AbortSignal; timeoutMs?: number };
 
 type CoreUploadFile = Blob | File | Uint8Array | ArrayBuffer;
 
@@ -134,6 +146,9 @@ type CoreUploadInput = {
 };
 
 type CoreEventHandlers = {
+  onReconnect?: (attempt: number) => void;
+  reconnect?: boolean;
+  reconnectDelayMs?: number;
   onError?: (error: unknown) => void;
   onEvent?: (event: CoreJobEvent) => void;
   onOpen?: () => void;
@@ -196,7 +211,7 @@ const parseSseEvents = (chunk: string) => {
     .filter((line) => line.startsWith("data:"))
     .map((line) => line.slice(5).trimStart());
   if (!dataLines.length) return [];
-  return dataLines.flatMap((line) => {
+  return [dataLines.join('\n')].flatMap((line) => {
     try {
       return [JSON.parse(line) as CoreJobEvent];
     } catch {
@@ -205,7 +220,7 @@ const parseSseEvents = (chunk: string) => {
   });
 };
 
-const createSvgTransformClient = ({ baseUrl, fetch: customFetch }: CoreClientOptions) => {
+const createSvgTransformClient = ({ baseUrl, fetch: customFetch, headers, timeoutMs = 30_000 }: CoreClientOptions) => {
   const fetchImpl = customFetch ?? globalThis.fetch;
   if (!fetchImpl) {
     throw new Error("fetch is required to create svg-transform core client");
@@ -213,11 +228,17 @@ const createSvgTransformClient = ({ baseUrl, fetch: customFetch }: CoreClientOpt
   const base = trimTrailingSlash(baseUrl);
   const url = (path: string) => `${base}${path}`;
 
-  const request = async (path: string, init?: RequestInit) => {
+  const request = async (path: string, init?: RequestInit & { timeoutMs?: number }) => {
+    const timeout = init?.timeoutMs ?? timeoutMs;
+    const signals = [init?.signal, timeout > 0 ? AbortSignal.timeout(timeout) : undefined].filter((value): value is AbortSignal => Boolean(value));
+    const signal = signals.length ? AbortSignal.any(signals) : undefined;
+    const requestHeaders = new Headers(headers);
+    new Headers(init?.headers).forEach((value, key) => requestHeaders.set(key, value));
     let response: Response;
     try {
-      response = await fetchImpl(url(path), init);
+      response = await fetchImpl(url(path), { ...init, signal: signal ?? null, headers: requestHeaders });
     } catch (error) {
+      if (signal?.aborted) throw signal.reason;
       const message = error instanceof Error ? error.message : String(error);
       throw new CoreClientError(`Core service unavailable: ${message}`, 502);
     }
@@ -225,12 +246,13 @@ const createSvgTransformClient = ({ baseUrl, fetch: customFetch }: CoreClientOpt
     return response;
   };
 
-  const requestJson = async <T>(path: string, init?: RequestInit) =>
+  const requestJson = async <T>(path: string, init?: RequestInit & { timeoutMs?: number }) =>
     (await request(path, init).then((response) => response.json())) as T;
 
   const createJob = (
     uploadFile: CoreUploadFile | CoreUploadInput,
     options: CoreCreateJobOptions = {},
+    requestOptions: CoreRequestOptions = {},
   ) => {
     const input = normalizeFileInput(uploadFile);
     const form = new FormData();
@@ -244,6 +266,7 @@ const createSvgTransformClient = ({ baseUrl, fetch: customFetch }: CoreClientOpt
     if (options.scale !== undefined) form.append("scale", String(options.scale));
     if (options.dryRun !== undefined) form.append("dryRun", String(options.dryRun));
     return requestJson<CoreCreateJobResponse>("/api/jobs", {
+      ...requestOptions,
       body: form,
       method: "POST",
     });
@@ -255,28 +278,53 @@ const createSvgTransformClient = ({ baseUrl, fetch: customFetch }: CoreClientOpt
   ): CoreEventConnection => {
     const controller = new AbortController();
     void (async () => {
+      let attempt = 0;
+      while (!controller.signal.aborted) {
+      let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
       try {
         const response = await request(`/api/jobs/${encodeURIComponent(id)}/events`, {
           headers: { Accept: "text/event-stream" },
           signal: controller.signal,
+          timeoutMs: 0,
         });
         handlers.onOpen?.();
         if (!response.body) return;
-        const reader = response.body.getReader();
+        reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = "";
         while (!controller.signal.aborted) {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split(/\n\n/);
+          if (buffer.length > 8 * 1024 * 1024) throw new Error('SSE frame exceeds 8 MiB');
+          const parts = buffer.split(/\r?\n\r?\n/);
           buffer = parts.pop() ?? "";
           for (const part of parts) {
-            for (const event of parseSseEvents(part)) handlers.onEvent?.(event);
+            for (const event of parseSseEvents(part)) {
+              handlers.onEvent?.(event);
+              if (event.type === 'init') attempt = 0;
+              if (event.type === 'job:deleted') controller.abort();
+            }
           }
         }
       } catch (error) {
         if (!controller.signal.aborted) handlers.onError?.(error);
+        if (error instanceof CoreClientError && error.status >= 400 && error.status < 500 && error.status !== 429) return;
+      } finally {
+        await reader?.cancel().catch(() => undefined);
+        reader?.releaseLock();
+      }
+      if (controller.signal.aborted || handlers.reconnect === false) return;
+      attempt++;
+      handlers.onReconnect?.(attempt);
+      const delay = Math.min(30_000, (handlers.reconnectDelayMs ?? 1000) * 2 ** Math.min(attempt - 1, 5));
+      await new Promise<void>((resolve) => {
+        const finish = () => { clearTimeout(timer); controller.signal.removeEventListener('abort', finish); resolve(); };
+        const timer = setTimeout(finish, delay);
+        (timer as unknown as { unref?: () => void }).unref?.();
+        controller.signal.addEventListener('abort', finish, { once: true });
+        if (controller.signal.aborted) finish();
+      });
       }
     })();
     return { close: () => controller.abort() };
@@ -286,28 +334,32 @@ const createSvgTransformClient = ({ baseUrl, fetch: customFetch }: CoreClientOpt
     baseUrl: base,
     connectJobEvents,
     createJob,
-    deleteJob: (id: string) =>
+    deleteJob: (id: string, options: CoreRequestOptions = {}) =>
       requestJson<CoreDeleteJobResponse>(`/api/jobs/${encodeURIComponent(id)}`, {
+        ...options,
         method: "DELETE",
       }),
-    getJob: (id: string) =>
-      requestJson<CoreJob>(`/api/jobs/${encodeURIComponent(id)}`),
-    health: async () => (await request("/health")).text(),
-    jobDownloadUrl: (id: string) => url(`/api/jobs/${encodeURIComponent(id)}/download`),
+    getJob: (id: string, options: CoreRequestOptions = {}) =>
+      requestJson<CoreJob>(`/api/jobs/${encodeURIComponent(id)}`, options),
+    health: async (options: CoreRequestOptions = {}) => (await request("/health", options)).text(),
+    readiness: async (options: CoreRequestOptions = {}) => requestJson<Record<string, unknown>>("/ready", options),
+    jobDownloadUrl: (id: string, kind: 'deliverable' | 'diagnostic' = 'deliverable') => url(`/api/jobs/${encodeURIComponent(id)}/download${kind === 'diagnostic' ? '?kind=diagnostic' : ''}`),
     jobFileUrl: (id: string, path: string) =>
       url(`/api/jobs/${encodeURIComponent(id)}/files/${encodePath(path)}`),
     jobPreviewUrl: (id: string) => url(`/api/jobs/${encodeURIComponent(id)}/preview`),
-    listJobs: () => requestJson<CoreJobSummary[]>("/api/jobs"),
+    listJobs: (options: CoreRequestOptions = {}) => requestJson<CoreJobSummary[]>("/api/jobs", options),
     request,
     requestJson,
-    sendJobMessage: (id: string, moduleId: string, text: string) =>
+    sendJobMessage: (id: string, moduleId: string, text: string, options: CoreRequestOptions = {}) =>
       requestJson<CoreSendJobMessageResponse>(`/api/jobs/${encodeURIComponent(id)}/messages`, {
+        ...options,
         body: JSON.stringify({ moduleId, text }),
         headers: { "Content-Type": "application/json" },
         method: "POST",
       }),
-    startJob: (id: string) =>
+    startJob: (id: string, options: CoreRequestOptions = {}) =>
       requestJson<CoreStartJobResponse>(`/api/jobs/${encodeURIComponent(id)}/start`, {
+        ...options,
         body: JSON.stringify({}),
         headers: { "Content-Type": "application/json" },
         method: "POST",
@@ -323,6 +375,9 @@ export {
 };
 
 export type {
+  CoreClientOptions,
+  CoreRequestOptions,
+  CoreJobResult,
   CoreCreateJobOptions,
   CoreCreateJobResponse,
   CoreDeleteJobResponse,

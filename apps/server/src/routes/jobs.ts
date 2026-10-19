@@ -1,5 +1,5 @@
 import path from "node:path";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile, realpath } from "node:fs/promises";
 import { existsSync, readFileSync } from "node:fs";
 
 import archiver from "archiver";
@@ -7,6 +7,7 @@ import { Router } from "express";
 import type { Request, Response } from "express";
 import multer from "multer";
 import { nanoid } from "nanoid";
+import { validateSvgInput } from "../core/svg-parse.js";
 
 import {
   getOutputFormatLabel,
@@ -86,6 +87,8 @@ router.post("/jobs", async (req, res) => {
   upload(req, res, async (error) => {
     const cleanup = async () => {
       if (jobId) {
+        sessionStore.detachSession(jobId);
+        await sessionStore.flushAll().catch(() => undefined);
         await rm(getJobDir(jobId), { force: true, recursive: true });
       }
     };
@@ -122,6 +125,7 @@ router.post("/jobs", async (req, res) => {
         outputFormat = req.body?.outputFormat === undefined
           ? "html"
           : parseOutputFormat(req.body.outputFormat);
+        validateSvgInput(file.buffer.toString("utf8"), scale);
       } catch (caughtError) {
         const message = caughtError instanceof Error
           ? caughtError.message
@@ -181,8 +185,9 @@ router.post("/jobs", async (req, res) => {
       });
 
       if (!parseDryRun(req.body?.dryRun)) {
-        enqueueSession(job.id);
+        await enqueueSession(job.id);
       }
+      await sessionStore.flushSessionWrites(job.id);
 
       res.status(202).json(jobForApi(job, { baseUrl: "/api/jobs" }));
     } catch (caughtError) {
@@ -210,13 +215,14 @@ router.get("/jobs/:id", (req, res) => {
   res.json(jobForApi(job, { baseUrl: "/api/jobs" }));
 });
 
-router.post("/jobs/:id/start", (req, res) => {
+router.post("/jobs/:id/start", async (req, res) => {
   const job = sessionStore.get(String(req.params["id"] ?? ""));
   if (!job) {
     res.status(404).json({ error: "Job not found" });
     return;
   }
   if (job.status === "queued" || job.status === "running") {
+    await sessionStore.flushSessionWrites(job.id);
     res.json({ jobId: job.id, status: job.status });
     return;
   }
@@ -224,11 +230,11 @@ router.post("/jobs/:id/start", (req, res) => {
     res.status(409).json({ error: `Cannot start job from status ${job.status}` });
     return;
   }
-  enqueueSession(job.id);
+  await enqueueSession(job.id);
   res.json({ jobId: job.id, status: "queued" });
 });
 
-router.post("/jobs/:id/messages", (req, res) => {
+router.post("/jobs/:id/messages", async (req, res) => {
   const job = sessionStore.get(String(req.params["id"] ?? ""));
   if (!job) {
     res.status(404).json({ error: "Job not found" });
@@ -276,8 +282,9 @@ router.post("/jobs/:id/messages", (req, res) => {
   );
   const guidanceStatus = job.status === "running" ? "queued-for-guidance" : "queued";
   if (job.status !== "running") {
-    enqueueSession(job.id);
+    await enqueueSession(job.id);
   }
+  await sessionStore.flushSessionWrites(job.id);
   res.status(202).json({
     guidanceStatus,
     jobId: job.id,
@@ -302,7 +309,7 @@ const sendJobFile = ({
 }: {
   notFoundMessage: string;
   pathPrefix?: string;
-}) => (req: Request, res: Response) => {
+}) => async (req: Request, res: Response) => {
   const job = sessionStore.get(String(req.params["id"] ?? ""));
   if (!job) {
     res.status(404).json({ error: "Job not found" });
@@ -321,6 +328,10 @@ const sendJobFile = ({
       res.status(404).json({ error: notFoundMessage });
       return;
     }
+    if (!isInsidePath(await realpath(job.sessionDir), await realpath(filePath))) {
+      res.status(403).json({ error: 'File reference escapes job directory' });
+      return;
+    }
     res.sendFile(filePath);
   } catch (caughtError) {
     const message = caughtError instanceof Error
@@ -330,7 +341,7 @@ const sendJobFile = ({
   }
 };
 
-router.get("/jobs/:id/preview", (req, res) => {
+router.get("/jobs/:id/preview", async (req, res) => {
   const job = sessionStore.get(String(req.params["id"] ?? ""));
   if (!job) {
     res.status(404).json({ error: "Job not found" });
@@ -339,6 +350,10 @@ router.get("/jobs/:id/preview", (req, res) => {
   const previewPath = job.result.livePreviewEntryPath ?? job.result.renderEntryPath;
   if (!previewPath || !existsSync(previewPath)) {
     res.status(404).json({ error: "Preview not available" });
+    return;
+  }
+  if (!isInsidePath(await realpath(job.sessionDir), await realpath(previewPath))) {
+    res.status(403).json({ error: 'Preview reference escapes job directory' });
     return;
   }
   res.sendFile(previewPath);
@@ -365,7 +380,21 @@ router.get("/jobs/:id/download", async (req, res) => {
     return;
   }
 
-  const zipName = `${job.designName || job.id}.zip`;
+  const kind = req.query['kind'] ?? 'deliverable';
+  if (kind !== 'diagnostic' && kind !== 'deliverable') {
+    res.status(400).json({ error: 'kind must be deliverable or diagnostic' });
+    return;
+  }
+  if (kind === 'deliverable') {
+    const zipPath = job.result.deliverable?.zipPath;
+    if (!isCompletedJobStatus(job.status) || !zipPath || !existsSync(zipPath)) {
+      res.status(409).json({ error: 'Deliverable is not ready; use kind=diagnostic for diagnostic artifacts' });
+      return;
+    }
+    res.download(zipPath, `${job.designName || job.id}.zip`);
+    return;
+  }
+  const zipName = `${job.designName || job.id}-diagnostic.zip`;
   res.setHeader("Content-Type", "application/zip");
   res.setHeader(
     "Content-Disposition",
@@ -381,7 +410,8 @@ router.get("/jobs/:id/download", async (req, res) => {
     res.destroy(archiveError);
   });
   archive.pipe(res);
-  archive.directory(job.sessionDir, job.designName || job.id);
+  archive.glob('**/*', { cwd: job.sessionDir, dot: true, ignore: ['exports/**'] }, { prefix: job.id });
+  res.on('close', () => archive.abort());
   await archive.finalize();
 });
 
@@ -430,7 +460,7 @@ router.delete("/jobs/:id", async (req, res) => {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (canceledRun?.queued && sessionStore.get(job.id)) {
-      enqueueSession(job.id);
+      await enqueueSession(job.id);
     }
     res.status(500).json({ error: message });
   }

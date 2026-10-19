@@ -17,3 +17,5 @@ apps/server/config/model-provider.json
 *.tsbuildinfo
 .artifacts/
 .idea/
+**/queue-settings.json
+**/queue-settings.json.*

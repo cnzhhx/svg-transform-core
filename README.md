@@ -10,6 +10,10 @@ Published artifacts:
 The service is intentionally core-only. It does not include account systems,
 billing, quotas, orders, tenant rules, or a business frontend.
 
+Runtime behavior and migration notes for quality policies, restart recovery,
+immutable deliverables, SSE reconnection, and non-root containers are documented
+in [configuration](docs/configuration.md#recovery-delivery-and-runtime-boundaries).
+
 ## Quick Start
 
 ### Run the service

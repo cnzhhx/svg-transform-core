@@ -16,7 +16,7 @@ import {
   createModuleTextStyleHints,
   type ModuleTextStyleHintsFile,
 } from "./module-text-style-inference.js";
-import { textColorFromNodePaint } from "./module-semantic-paint.js";
+import { TEXT_PAINT_OPACITY_STAGE, textColorFromNodePaint } from "./module-semantic-paint.js";
 import { Semaphore } from "../queue/concurrency.js";
 import { throwIfRunAborted } from "../session/run-control.js";
 
@@ -26,8 +26,6 @@ class ModuleInputError extends Error {
     this.name = "ModuleInputError";
   }
 }
-
-const TEXT_PAINT_OPACITY_STAGE = "text-paint-opacity-v2";
 
 const SEMITRANSPARENT_COLOR_RE =
   /^rgba\(\s*[^,]+\s*,\s*[^,]+\s*,\s*[^,]+\s*,\s*(0(?:\.\d+)?|1\.0+)\s*\)$/i;
@@ -240,8 +238,7 @@ const preprocessModuleSemantic = async ({
   const hasCachedTextArtifacts =
     currentSemantic.runtime.completedStages.includes("text-blocks") &&
     currentSemantic.runtime.completedStages.includes("text-style-inference") &&
-    currentSemantic.runtime.completedStages.includes(TEXT_PAINT_OPACITY_STAGE) &&
-    currentSemantic.textBlocks.length > 0;
+    currentSemantic.runtime.completedStages.includes(TEXT_PAINT_OPACITY_STAGE);
 
   const semanticTextHints = buildModuleSemanticTextHints(currentSemantic);
   const textBlocksFile = hasCachedTextArtifacts

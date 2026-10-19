@@ -1,3 +1,5 @@
+import type { AgentRuntimeFailure } from './errors.js';
+
 type CommandExecutionStatus = "in_progress" | "completed" | "failed";
 type PatchChangeKind = "add" | "delete" | "update";
 type PatchApplyStatus = "completed" | "failed";
@@ -149,7 +151,7 @@ type AgentThreadEvent =
   | { type: "turn.started" }
   | { metrics: AgentTurnMetrics; type: "turn.metrics" }
   | { type: "turn.completed"; usage: Usage }
-  | { error: { message: string }; type: "turn.failed" }
+  | { error: AgentRuntimeFailure; type: "turn.failed" }
   | { item: AgentThreadItem; type: "item.started" }
   | { item: AgentThreadItem; type: "item.updated" }
   | { item: AgentThreadItem; type: "item.completed" }

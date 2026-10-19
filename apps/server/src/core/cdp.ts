@@ -1,19 +1,23 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { Buffer } from "node:buffer";
 import { existsSync } from "node:fs";
 import {
   mkdir,
   mkdtemp,
   open,
+  readFile,
   rm,
   stat,
   unlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import WebSocket from "ws";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   getBrowserPoolDisabled,
   getBrowserPoolIdleMs,
@@ -91,10 +95,26 @@ type TargetInfo = {
 };
 
 type PendingMessage = {
+  cleanup?: () => void;
   reject: (reason?: unknown) => void;
   resolve: (value: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
 };
+
+const operationSignals = new AsyncLocalStorage<AbortSignal | undefined>();
+export const withCdpSignal = <T>(signal: AbortSignal, operation: () => T): T =>
+  operationSignals.run(signal, operation);
+const resolveCdpSignal = (signal?: AbortSignal) => {
+  const inherited = operationSignals.getStore();
+  return inherited && signal && inherited !== signal ? AbortSignal.any([inherited, signal]) : signal ?? inherited;
+};
+
+class CdpCommandTimeoutError extends Error {
+  constructor(method: string, timeoutMs: number) {
+    super(`Timed out after ${timeoutMs}ms waiting for CDP command: ${method}`);
+    this.name = "CdpCommandTimeoutError";
+  }
+}
 
 const toCdpViewportSize = (value: number) =>
   Math.max(1, Math.ceil(Number.isFinite(value) ? value : 1));
@@ -123,7 +143,7 @@ class CdpClient {
   private closed = false;
   private messageId = 0;
 
-  private constructor(private readonly socket: WebSocket) {
+  private constructor(private readonly socket: WebSocket, private readonly signal?: AbortSignal) {
     socket.on("message", (data: string | Buffer) => {
       const message = JSON.parse(String(data)) as {
         error?: { message?: string };
@@ -138,6 +158,7 @@ class CdpClient {
         if (!pending) return;
         this.pending.delete(message.id);
         clearTimeout(pending.timer);
+        pending.cleanup?.();
         if (message.error) {
           pending.reject(
             new Error(message.error.message ?? "Unknown CDP error"),
@@ -162,15 +183,27 @@ class CdpClient {
     });
   }
 
-  static connect = async (url: string) => {
+  static connect = async (url: string, signal?: AbortSignal) => {
+    signal?.throwIfAborted();
     const socket = new WebSocket(url);
 
     await new Promise<void>((resolve, reject) => {
-      socket.once("open", () => resolve());
-      socket.once("error", reject);
+      const timer = setTimeout(() => fail(new CdpCommandTimeoutError("WebSocket.connect", getCdpSendTimeoutMs())), getCdpSendTimeoutMs());
+      const cleanup = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
+        socket.removeListener("open", ready);
+      };
+      const fail = (error: unknown) => { cleanup(); socket.terminate(); reject(error); };
+      const abort = () => fail(abortError(signal));
+      const ready = () => { cleanup(); socket.removeListener("error", fail); resolve(); };
+      socket.once("open", ready);
+      socket.once("error", fail);
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
     });
 
-    return new CdpClient(socket);
+    return new CdpClient(socket, signal);
   };
 
   close = () => {
@@ -183,31 +216,41 @@ class CdpClient {
     method: string,
     params: Record<string, unknown> = {},
     timeoutMs = getCdpSendTimeoutMs(),
+    signal: AbortSignal | null | undefined = this.signal,
   ) => {
+    if (signal?.aborted) return Promise.reject(abortError(signal));
     if (this.closed) {
       return Promise.reject(new Error(`CDP socket is closed: ${method}`));
     }
     const id = ++this.messageId;
 
     return new Promise<T>((resolve, reject) => {
+      const abort = () => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        signal?.removeEventListener("abort", abort);
+        reject(abortError(signal));
+      };
       const timer = setTimeout(() => {
         this.pending.delete(id);
+        signal?.removeEventListener("abort", abort);
         reject(
-          new Error(
-            `Timed out after ${timeoutMs}ms waiting for CDP command: ${method}`,
-          ),
+          new CdpCommandTimeoutError(method, timeoutMs),
         );
       }, timeoutMs);
       this.pending.set(id, {
+        cleanup: () => signal?.removeEventListener("abort", abort),
         reject,
         resolve: resolve as (value: unknown) => void,
         timer,
       });
+      signal?.addEventListener("abort", abort, { once: true });
       try {
         this.socket.send(JSON.stringify({ id, method, params }));
       } catch (error) {
         clearTimeout(timer);
         this.pending.delete(id);
+        signal?.removeEventListener("abort", abort);
         reject(error);
       }
     });
@@ -216,6 +259,7 @@ class CdpClient {
   private rejectAllPending(error: Error) {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timer);
+      pending.cleanup?.();
       pending.reject(error);
     }
     this.pending.clear();
@@ -257,21 +301,42 @@ const CDP_OPERATION_LOCK_DIR = path.join(os.tmpdir(), "svg-to-html-cdp-locks");
 const normalizeCdpOperationConcurrency = (value: number) =>
   Math.max(1, Math.floor(Number.isFinite(value) ? value : 1));
 
-const acquireCdpOperationSlot = async () => {
+const abortError = (signal?: AbortSignal | null) => {
+  const error = new Error(String(signal?.reason ?? "aborted"));
+  error.name = "AbortError";
+  return error;
+};
+
+const acquireCdpOperationSlot = async (signal?: AbortSignal) => {
+  if (signal?.aborted) throw abortError(signal);
   const limit = normalizeCdpOperationConcurrency(getCdpOperationConcurrency());
   await mkdir(CDP_OPERATION_LOCK_DIR, { recursive: true });
   const startedAt = Date.now();
   const token = `${process.pid}\n${startedAt}\n`;
 
   for (;;) {
+    if (signal?.aborted) throw abortError(signal);
     for (let slot = 0; slot < limit; slot++) {
       const lockPath = path.join(CDP_OPERATION_LOCK_DIR, `slot-${slot}.lock`);
       try {
         const handle = await open(lockPath, "wx");
         await handle.writeFile(token);
         await handle.close();
+        let renewal = Promise.resolve();
+        const heartbeat = setInterval(() => {
+          renewal = renewal.then(async () => {
+            if (await readFile(lockPath, "utf8").catch(() => "") !== token) return;
+            const now = new Date();
+            await utimes(lockPath, now, now).catch(() => {});
+          });
+        }, 60_000);
+        heartbeat.unref?.();
         return async () => {
-          await unlink(lockPath).catch(() => {});
+          clearInterval(heartbeat);
+          await renewal;
+          if (await readFile(lockPath, "utf8").catch(() => "") === token) {
+            await unlink(lockPath).catch(() => {});
+          }
         };
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
@@ -287,16 +352,45 @@ const acquireCdpOperationSlot = async () => {
       }
     }
 
-    await sleep(CDP_OPERATION_LOCK_RETRY_MS);
+    await delay(CDP_OPERATION_LOCK_RETRY_MS, undefined, { signal });
   }
 };
 
-const withCdpOperationSlot = async <T>(operation: () => Promise<T>) => {
-  const release = await acquireCdpOperationSlot();
+const withCdpOperationSlot = async <T>(operation: () => Promise<T>, signal = resolveCdpSignal()) => {
+  const release = await acquireCdpOperationSlot(signal);
   try {
+    if (signal?.aborted) throw abortError(signal);
     return await operation();
   } finally {
     await release();
+  }
+};
+
+// Retry whole disposable-page operations, never individual commands: a timed-out
+// evaluate may still be running and must not be replayed on the same page.
+const withCdpPageRetries = async <T>(
+  label: string,
+  operation: () => Promise<T>,
+  maxRetries = 5,
+  signal?: AbortSignal,
+) => {
+  maxRetries = Number.isFinite(maxRetries) ? Math.max(0, Math.min(5, Math.floor(maxRetries))) : 5;
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      // Release the slot (and let the operation clean up its target) before
+      // backing off, so other sessions can make progress between attempts.
+      return await withCdpOperationSlot(operation, signal);
+    } catch (error) {
+      if (signal?.aborted) throw abortError(signal);
+      if (!(error instanceof CdpCommandTimeoutError) || attempt >= maxRetries) {
+        throw error;
+      }
+      const delayMs = 1000 * 2 ** attempt + Math.floor(Math.random() * 250);
+      console.warn(
+        `[cdp-retry] ${label}: ${error.message}; retry ${attempt + 1}/${maxRetries} with a fresh target in ${delayMs}ms`,
+      );
+      await delay(delayMs, undefined, { signal });
+    }
   }
 };
 
@@ -322,27 +416,31 @@ const getAvailablePort = async () =>
     });
   });
 
-const waitForCdp = async (port: number) => {
+const waitForCdp = async (port: number, timeoutMs = getCdpReadyTimeoutMs()) => {
   const versionUrl = `http://127.0.0.1:${port}/json/version`;
-
-  for (let attempt = 0; attempt < 60; attempt++) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
     try {
-      const response = await fetch(versionUrl);
+      const response = await fetch(versionUrl, { signal: AbortSignal.timeout(Math.max(1, Math.min(2500, timeoutMs - (Date.now() - startedAt)))) });
       if (response.ok) return;
     } catch {}
 
     await sleep(250);
   }
 
-  throw new Error(`CDP did not become ready on port ${port}`);
+  throw new Error(`CDP did not become ready on port ${port} after ${timeoutMs}ms`);
 };
 
-const createTarget = async (port: number): Promise<TargetInfo> => {
+const createTarget = async (port: number, signal?: AbortSignal): Promise<TargetInfo> => {
   const endpoint = `http://127.0.0.1:${port}/json/new?about%3Ablank`;
 
+  const timeout = AbortSignal.timeout(getCdpSendTimeoutMs());
+  const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout;
   const response =
-    (await fetch(endpoint, { method: "PUT" }).catch(() => null)) ??
-    (await fetch(endpoint));
+    (await fetch(endpoint, { method: "PUT", signal: requestSignal }).catch(() => {
+      requestSignal.throwIfAborted();
+      return null;
+    })) ?? (await fetch(endpoint, { signal: requestSignal }));
 
   if (!response.ok)
     throw new Error(`Failed to create CDP target: ${response.status}`);
@@ -354,7 +452,7 @@ const closeTarget = async (port: number, targetId: string) => {
   const endpoint = `http://127.0.0.1:${port}/json/close/${encodeURIComponent(targetId)}`;
 
   try {
-    const response = await fetch(endpoint);
+    const response = await fetch(endpoint, { signal: AbortSignal.timeout(3000) });
     if (!response.ok)
       throw new Error(`Failed to close CDP target: ${response.status}`);
   } catch {
@@ -377,6 +475,7 @@ const waitForCondition = async (
         expression,
         returnByValue: true,
       },
+      Math.max(1, Math.min(getCdpSendTimeoutMs(), timeoutMs - (Date.now() - startedAt))),
     );
 
     if (result.result?.value) return;
@@ -622,6 +721,7 @@ const capturePageUnlocked = async ({
   port,
   readyExpression = 'document.readyState === "complete" && window.__RENDER_READY__ === true',
   readyTimeoutMs = getCdpReadyTimeoutMs(),
+  signal,
   transparentBackground = false,
   url,
   viewportHeight,
@@ -639,12 +739,14 @@ const capturePageUnlocked = async ({
   port: number;
   readyExpression?: string;
   readyTimeoutMs?: number;
+  maxRetries?: number;
+  signal?: AbortSignal;
   transparentBackground?: boolean;
   url: string;
   viewportHeight: number;
   viewportWidth: number;
 }) => {
-  const target = await createTarget(port);
+  const target = await createTarget(port, signal);
   let cdp: CdpClient | undefined;
   const safeDeviceScaleFactor =
     Number.isFinite(deviceScaleFactor) && deviceScaleFactor > 0
@@ -654,7 +756,7 @@ const capturePageUnlocked = async ({
   const metricViewportWidth = toCdpViewportSize(viewportWidth);
 
   try {
-    cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
+    cdp = await CdpClient.connect(target.webSocketDebuggerUrl, signal);
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     if (transparentBackground) {
@@ -695,14 +797,21 @@ const capturePageUnlocked = async ({
       },
     );
 
+    signal?.throwIfAborted();
     await writeFile(outputPath, Buffer.from(screenshot.data, "base64"));
+  } catch (error) {
+    if ((error instanceof CdpCommandTimeoutError || signal?.aborted) && cdp) {
+      await cdp.send("Runtime.terminateExecution", {}, 1000, null).catch(() => {});
+    }
+    throw error;
   } finally {
     if (cdp) {
       try {
-        await cdp.send("Page.stopLoading");
+        // A stalled renderer must not add two full command timeouts to cleanup.
+        await cdp.send("Page.stopLoading", {}, 1000, null);
       } catch {}
       try {
-        await cdp.send("Page.resetNavigationHistory");
+        await cdp.send("Page.resetNavigationHistory", {}, 1000, null);
       } catch {}
     }
     cdp?.close();
@@ -710,8 +819,10 @@ const capturePageUnlocked = async ({
   }
 };
 
-const capturePage: typeof capturePageUnlocked = async (options) =>
-  withCdpOperationSlot(() => capturePageUnlocked(options));
+const capturePage: typeof capturePageUnlocked = async (options) => {
+  const signal = resolveCdpSignal(options.signal);
+  return withCdpPageRetries(`capturePage ${options.outputPath}`, () => capturePageUnlocked({ ...options, signal }), options.maxRetries ?? 5, signal);
+};
 
 const evaluatePageUnlocked = async <T>({
   deviceScaleFactor = 1,
@@ -720,6 +831,7 @@ const evaluatePageUnlocked = async <T>({
   port,
   readyExpression = 'document.readyState === "complete" && window.__RENDER_READY__ === true',
   readyTimeoutMs = getCdpReadyTimeoutMs(),
+  signal,
   url,
   viewportHeight,
   viewportWidth,
@@ -728,6 +840,8 @@ const evaluatePageUnlocked = async <T>({
   expression: string;
   evaluateTimeoutMs?: number;
   port: number;
+  maxRetries?: number;
+  signal?: AbortSignal;
   readyExpression?: string;
   readyTimeoutMs?: number;
   url: string;
@@ -740,11 +854,11 @@ const evaluatePageUnlocked = async <T>({
       : 1;
   const metricViewportHeight = toCdpViewportSize(viewportHeight);
   const metricViewportWidth = toCdpViewportSize(viewportWidth);
-  const target = await createTarget(port);
+  const target = await createTarget(port, signal);
   let cdp: CdpClient | undefined;
 
   try {
-    cdp = await CdpClient.connect(target.webSocketDebuggerUrl);
+    cdp = await CdpClient.connect(target.webSocketDebuggerUrl, signal);
     await cdp.send("Page.enable");
     await cdp.send("Runtime.enable");
     await cdp.send("Emulation.setDeviceMetricsOverride", {
@@ -781,6 +895,13 @@ const evaluatePageUnlocked = async <T>({
     }
 
     return result.result?.value as T;
+  } catch (error) {
+    if ((error instanceof CdpCommandTimeoutError || signal?.aborted) && cdp) {
+      // A transport timeout does not stop JavaScript. Interrupt it before
+      // closing the target, otherwise retries can leave a renderer CPU-bound.
+      await cdp.send("Runtime.terminateExecution", {}, 1000, null).catch(() => {});
+    }
+    throw error;
   } finally {
     cdp?.close();
     await closeTarget(port, target.id);
@@ -792,12 +913,22 @@ const evaluatePage: typeof evaluatePageUnlocked = async <T>(options: {
   expression: string;
   evaluateTimeoutMs?: number;
   port: number;
+  maxRetries?: number;
+  signal?: AbortSignal;
   readyExpression?: string;
   readyTimeoutMs?: number;
   url: string;
   viewportHeight: number;
   viewportWidth: number;
-}) => withCdpOperationSlot(() => evaluatePageUnlocked<T>(options));
+}) => {
+  const signal = resolveCdpSignal(options.signal);
+  return withCdpPageRetries(
+  `evaluatePage ${options.url}`,
+  () => evaluatePageUnlocked<T>({ ...options, signal }),
+  options.maxRetries ?? 5,
+  signal,
+);
+};
 
 export {
   capturePage,

@@ -1,4 +1,5 @@
 import { sessionStore } from '../../../session-store.js'
+import { AgentRuntimeError } from '../../agent-runtime/errors.js'
 import type { AgentInput, AgentThread } from '../../agent-runtime/index.js'
 import {
   archiveAgentCommandCheckpoint,
@@ -237,6 +238,8 @@ export async function runAgentTurnCore(
         event.thread_id !== pendingThreadId
       ) {
         pendingThreadId = event.thread_id
+        notifiedThreadId = pendingThreadId
+        onThreadStarted?.(pendingThreadId)
       }
       logThreadEvent(sessionId, event, {
         eventSourceLabel,
@@ -448,7 +451,7 @@ export async function runAgentTurnCore(
         metrics = event.metrics
       }
       if (event.type === 'turn.failed') {
-        throw new Error(event.error.message)
+        throw new AgentRuntimeError(event.error)
       }
     }
   } catch (error) {

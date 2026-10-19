@@ -43,6 +43,11 @@ const sanitizeOutputTarget = (
 }
 
 const RESULT_KEYS = new Set<keyof SessionResult>([
+  'quality',
+  'deliverable',
+  'recovering',
+  'stageTimings',
+  'modulePlanModules',
   'sourceEntryPath',
   'sourceStylePath',
   'renderEntryPath',
@@ -136,6 +141,7 @@ const TOP_LEVEL_KEYS = new Set<keyof Session>([
   'logs',
   'messages',
   'pendingUserMessages',
+  'inFlightUserMessages',
   'progress',
   'persistence',
   'createdAt',

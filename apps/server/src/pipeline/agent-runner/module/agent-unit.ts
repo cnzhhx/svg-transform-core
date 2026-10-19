@@ -17,9 +17,13 @@ import {
   startAgentThread,
 } from "../../llm-client.js";
 import { runAgentTurnCore } from "../turn/agent-turn-core.js";
-import { isAbortError, throwIfRunAborted } from "../session/run-control.js";
+import { throwIfRunAborted } from "../session/run-control.js";
+import { runWithModelRetries } from "../../model-retry.js";
+import { recordModelRetry } from "../../model-usage.js";
+import { clearPersistedModuleAgentThreadId } from './module-thread-ids.js';
 import { verifyModuleLocal } from "./module-local-verify.js";
 import { verifyModuleFrameworkLocal } from "./module-framework-local-verify.js";
+import { candidateContext, restoreModuleCandidate } from '../../../core/artifact-cache.js';
 import {
   compactDocumentForAgent,
   readModuleSemanticDocument,
@@ -56,6 +60,7 @@ type AgentUnitInput = {
   prependFollowupBasePrompt?: boolean;
   revisionPrompt?: string; // 可选的后续修复 prompt
   onThreadStarted?: (threadId: string) => void;
+  onThreadReplaced?: (thread: AgentThread) => void;
   onArtifactUpdateSignal?: (
     signal: AgentArtifactUpdateSignal,
   ) => Promise<void> | void;
@@ -149,36 +154,6 @@ type PostSanitizeVerifySummary = {
 
 const MODULE_AGENT_RECONNECT_PROMPT =
   "上一轮因为模型或连接异常中断。请继续完成当前模块任务，保留并复用已有文件和已导出的 assets，检查 preview.fragment.html、module.css、manifest.json 是否完整，不要从头重做无关工作。";
-
-const isRetryableAgentTurnError = (error: unknown) => {
-  if (isAbortError(error)) return false;
-  if (!(error instanceof Error)) return false;
-  const message = error.message.toLowerCase();
-  if (!message) return false;
-  if (
-    message.includes("module-timeout") ||
-    message.includes("user-guidance-interrupt")
-  ) {
-    return false;
-  }
-  return [
-    "opencode cli exited",
-    "failed to start opencode cli",
-    "apierror",
-    "api error",
-    "unprocessable_entity_error",
-    "input new_sensitive",
-    "sensitive",
-    "provider",
-    "fetch failed",
-    "network",
-    "socket",
-    "econnreset",
-    "econnrefused",
-    "etimedout",
-    "http",
-  ].some((needle) => message.includes(needle));
-};
 
 const statSignature = async (filePath: string) => {
   try {
@@ -587,8 +562,6 @@ const verifyAfterSanitizeIfNeeded = async ({
   turn: AgentTurnForDiffResolution;
   workingDir: string;
 }): Promise<PostSanitizeVerifySummary | undefined> => {
-  if (turn.turnSummary.verifyUsage.verifyCount <= 0) return undefined;
-
   const verifyRound = Math.max(0, round + turn.turnSummary.verifyUsage.verifyCount);
   const localVerify = await verifyModuleLocal({
     module,
@@ -633,6 +606,7 @@ const verifyAfterSanitizeIfNeeded = async ({
     });
     throwIfRunAborted(controller);
     if (frameworkVerify) {
+      if (frameworkVerify.buildError) throw new Error(`Framework verification failed: ${frameworkVerify.buildError}`);
       verifyCount += 1;
       frameworkDiffRatio = frameworkVerify.diffRatio;
       finalDiffRatio = Math.max(finalDiffRatio, frameworkVerify.diffRatio);
@@ -684,6 +658,7 @@ export async function runAgentUnit(
     prependFollowupBasePrompt = true,
     revisionPrompt,
     onThreadStarted,
+    onThreadReplaced,
     onArtifactUpdateSignal,
     round = 1,
     thread: inputThread,
@@ -749,7 +724,7 @@ export async function runAgentUnit(
   if (extraPrompt?.trim()) {
     prompt = `${prompt}\n\n${extraPrompt.trim()}`;
   }
-  const thread =
+  let thread =
     inputThread ??
     createAgentUnitThread({
       artifactDir,
@@ -807,22 +782,65 @@ export async function runAgentUnit(
       },
     });
 
-  let turn: Awaited<ReturnType<typeof runModuleTurn>>;
   setModuleActive({ active: true, moduleId: module.id, sessionId });
-  try {
-    turn = await runModuleTurn(prompt);
-  } catch (error) {
-    if (controller.signal.aborted || !isRetryableAgentTurnError(error)) {
-      throw error;
-    }
-    const message = error instanceof Error ? error.message : String(error);
-    sessionStore.addLog(
-      sessionId,
-      `[agent-unit:${module.id}] turn failed due to model/runtime error; retrying same thread once: ${message}`,
-    );
-    throwIfRunAborted(controller);
-    turn = await runModuleTurn(MODULE_AGENT_RECONNECT_PROMPT);
-  }
+  let latestFullPrompt = prompt;
+  const turn = await runWithModelRetries({
+    signal: interruptSignal
+      ? AbortSignal.any([controller.signal, interruptSignal])
+      : controller.signal,
+    onRetry: retry => recordModelRetry(retry, { sessionId, moduleId: module.id, source: 'agent-unit' }),
+    run: async (retry) => {
+      if (!retry) return runModuleTurn(prompt);
+      if (!retry.freshThread) {
+        // A failed launch may not have created any conversation to resume.
+        return runModuleTurn(thread.id ? MODULE_AGENT_RECONNECT_PROMPT : latestFullPrompt);
+      }
+      clearPersistedModuleAgentThreadId(sessionId, module.id);
+      thread = createAgentUnitThread({
+        artifactDir,
+        design,
+        originalSvgPath,
+        reasoningEffort,
+        enableModuleCoordinator: moduleCoordinator?.enabled,
+        workingDir,
+      });
+      onThreadReplaced?.(thread);
+      // Rebuild from current files, never replay stale injected file contents
+      // or the encrypted history that caused the previous request to fail.
+      const recoveryPrompt = buildAgentUnitPrompt({
+        module, design, modulePlan, moduleCoordinator, workingDir,
+      });
+      const context = await buildInjectedModuleContext(workingDir);
+      latestFullPrompt = [
+        recoveryPrompt, context, revisionPrompt, extraPrompt,
+        MODULE_AGENT_RECONNECT_PROMPT,
+      ].filter(Boolean).join("\n\n");
+      return runModuleTurn(latestFullPrompt);
+    },
+  }).catch((error): Awaited<ReturnType<typeof runModuleTurn>> => {
+    if (controller.signal.aborted || !interruptSignal?.aborted) throw error;
+    // Guidance arriving during the retry delay must use the normal interrupted
+    // result path, rather than aborting the whole parallel module pipeline.
+    const endedAt = Date.now();
+    return {
+      finalResponse: "",
+      hasCompletedAgentMessage: false,
+      usage: null,
+      turnSummary: {
+        commands: [],
+        durationMs: endedAt - startedAt,
+        earlyStopReason: String(interruptSignal.reason ?? interruptLabel ?? ""),
+        endedAt,
+        internalRounds: [],
+        messages: [],
+        startedAt,
+        totalCommands: 0,
+        totalInternalRounds: 0,
+        usage: null,
+        verifyUsage: { verifyCount: 0 },
+      },
+    };
+  });
 
   sessionStore.addLog(
     sessionId,
@@ -948,25 +966,33 @@ export async function runAgentUnit(
       sessionId,
       `[agent-unit:${module.id}] sanitized module output: ${sanitizeResult.reason ?? "normalized root styles"}`,
     );
-    postSanitizeVerify = await verifyAfterSanitizeIfNeeded({
-      controller,
-      design,
-      module,
-      modulePlan,
-      moduleSvgPath,
-      outputFormat,
-      round,
-      sessionId,
-      turn,
-      workingDir,
-    });
   }
+  postSanitizeVerify = await verifyAfterSanitizeIfNeeded({
+    controller,
+    design,
+    module,
+    modulePlan,
+    moduleSvgPath,
+    outputFormat,
+    round,
+    sessionId,
+    turn,
+    workingDir,
+  });
 
   throwIfRunAborted(controller);
-  const finalDiffRatio = resolveAgentFinalDiffRatio({
+  let finalDiffRatio = resolveAgentFinalDiffRatio({
     postSanitizeVerify,
     turn,
   });
+  if (promptKind === 'initial' && !extraPrompt?.trim() &&
+      await restoreModuleCandidate(workingDir, postSanitizeVerify?.diffRatio ?? 1,
+        await candidateContext(workingDir, outputFormat))) {
+    postSanitizeVerify = await verifyAfterSanitizeIfNeeded({ controller, design, module,
+      modulePlan, moduleSvgPath, outputFormat, round, sessionId, turn, workingDir });
+    finalDiffRatio = postSanitizeVerify?.diffRatio;
+    sessionStore.addLog(sessionId, `[agent-unit:${module.id}] restored verified best candidate`);
+  }
   // 读取输出文件
   const [
     previewFragmentHtml,

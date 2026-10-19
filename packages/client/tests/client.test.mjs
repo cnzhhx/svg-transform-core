@@ -13,6 +13,51 @@ const jsonResponse = (value, init) =>
   });
 
 describe("createSvgTransformClient", () => {
+  it('reconnects and resynchronizes CRLF/multiline SSE frames without reconnecting after close', async () => {
+    let requests = 0;
+    const encoder = new TextEncoder();
+    const client = createSvgTransformClient({ baseUrl: 'https://core.example.test', fetch: async () => {
+      requests++;
+      return new Response(new ReadableStream({ start(controller) {
+        controller.enqueue(encoder.encode(`data: {"type":"init",\r\ndata: "timestamp":${requests},"job":{}}\r\n\r\n`));
+        controller.close();
+      } }));
+    } });
+    const seen = [];
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error('reconnect timed out')), 1000);
+      const connection = client.connectJobEvents('job', { reconnectDelayMs: 1, onError: reject, onEvent(event) {
+        seen.push(event.timestamp);
+        if (seen.length === 2) { connection.close(); clearTimeout(timer); resolve(); }
+      } });
+    });
+    assert.deepEqual(seen, [1, 2]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(requests, 2);
+  });
+
+  it('merges authorization headers and propagates cancellation as an abort', async () => {
+    const client = createSvgTransformClient({ baseUrl: 'https://core.example.test', headers: { Authorization: 'Bearer example' }, fetch: async (_url, init) => {
+      assert.equal(new Headers(init.headers).get('Authorization'), 'Bearer example');
+      init.signal.throwIfAborted();
+      return jsonResponse({ status: 'completed' });
+    } });
+    assert.equal((await client.getJob('job')).status, 'completed');
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(client.getJob('job', { signal: controller.signal }), { name: 'AbortError' });
+  });
+
+  it('does not retry permanent SSE errors', async () => {
+    let requests = 0;
+    const client = createSvgTransformClient({ baseUrl: 'https://core.example.test', fetch: async () => {
+      requests++;
+      return jsonResponse({ error: 'missing' }, { status: 404 });
+    } });
+    await new Promise((resolve) => client.connectJobEvents('missing', { reconnectDelayMs: 1, onError: resolve }));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(requests, 1);
+  });
   it("normalizes the base URL and safely encodes job and file paths", async () => {
     const calls = [];
     const client = createSvgTransformClient({

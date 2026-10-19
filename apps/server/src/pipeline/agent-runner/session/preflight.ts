@@ -1,4 +1,6 @@
 import path from "node:path";
+import { CONVERSION_CACHE_VERSION } from '../../../core/conversion-version.js';
+import { atomicJson, fingerprintFiles } from '../../../core/artifact-cache.js';
 
 import { createContainerLayoutReport } from "../../../core/container-layout/index.js";
 import { initializeDesignScaffolds } from "../../../core/design-scaffold.js";
@@ -27,6 +29,14 @@ const prepareStructuredSessionInputs = async ({
   sessionId: string;
   svgPath: string;
 }) => {
+  const timed = async <T>(name: string, work: () => Promise<T>) => {
+    const startedAt = Date.now();
+    try { return await work(); } finally {
+      const current = sessionStore.get(sessionId);
+      if (current) sessionStore.update(sessionId, { result: { ...current.result,
+        stageTimings: { ...current.result.stageTimings, [name]: Date.now() - startedAt } } });
+    }
+  };
   sessionStore.addLog(
     sessionId,
     "[pipeline] step 1/6 resolve container-layout",
@@ -36,10 +46,10 @@ const prepareStructuredSessionInputs = async ({
   });
 
   throwIfRunAborted(controller);
-  const containerLayout = await createContainerLayoutReport({
+  const containerLayout = await timed('container-layout', () => createContainerLayoutReport({
     inputPath: svgPath,
     scale,
-  });
+  }));
   throwIfRunAborted(controller);
 
   sessionStore.addLog(
@@ -47,12 +57,12 @@ const prepareStructuredSessionInputs = async ({
     "[pipeline] step 2/6 build semi-auto scaffold (shell assets)",
   );
   throwIfRunAborted(controller);
-  const semiAuto = await buildSemiAutoScaffoldArtifacts({
+  const semiAuto = await timed('scaffold', () => buildSemiAutoScaffoldArtifacts({
     containerLayoutReport: containerLayout.report,
     inputPath: svgPath,
     scale,
     svgLayoutReport: containerLayout.svgLayout,
-  });
+  }));
 
   throwIfRunAborted(controller);
   sessionStore.addLog(sessionId, "[pipeline] step 3/6 scaffold initialize");
@@ -65,27 +75,28 @@ const prepareStructuredSessionInputs = async ({
 
   throwIfRunAborted(controller);
   sessionStore.addLog(sessionId, "[pipeline] step 4/6 plan adaptive modules");
-  const modulePlan = await createAdaptiveModulePlan({
+  const modulePlan = await timed('module-planning', () => createAdaptiveModulePlan({
+    signal: controller.signal,
     artifactDir,
     containerLayoutReport: containerLayout.report,
     inputPath: svgPath,
     minGap: 10,
     scale,
     svgLayoutReport: containerLayout.svgLayout,
-  });
+  }));
 
   throwIfRunAborted(controller);
   sessionStore.addLog(
     sessionId,
     `[pipeline] step 5/6 crop module SVGs (${modulePlan.report.modules.length} module(s))`,
   );
-  const moduleSvgCrops = await cropAllModuleSvgs({
+  const moduleSvgCrops = await timed('module-cropping', () => cropAllModuleSvgs({
     originalSvgPath: design.svgPath,
     modules: modulePlan.report.modules,
     modulesRootDir: modulePlan.moduleDir,
     scale,
     sharedLayers: modulePlan.report.sharedLayers,
-  });
+  }));
   throwIfRunAborted(controller);
 
   const scaffoldHtmlPath = await ensureScaffoldSnapshot({
@@ -214,6 +225,12 @@ const prepareStructuredSessionInputs = async ({
     "analysis",
     "结构解析完成，开始进入大模型生成阶段",
   );
+
+  await atomicJson(path.join(artifactDir, '.preflight.json'), {
+    signature: await fingerprintFiles([svgPath], { outputFormat, scale, model: sessionStore.get(sessionId)?.model, version: CONVERSION_CACHE_VERSION }),
+    requiredFiles: [containerLayout.markdownPath, modulePlan.jsonPath, scaffoldHtmlPath,
+      ...modulePlan.report.modules.map((module) => path.join(modulePlan.moduleDir, module.id, 'module.svg'))],
+  });
 
   return {
     design,

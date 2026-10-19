@@ -43,6 +43,9 @@ jobs:
       - name: Run repository checks
         run: pnpm check
 
+      - name: Build exported projects with independent dependencies
+        run: TEST_EXPORTED_INSTALL=1 pnpm -C apps/server exec tsx --test tests/unit/deliverables.test.ts
+
       - name: Audit production dependencies
         run: pnpm audit --prod --audit-level high
 
@@ -110,7 +113,7 @@ jobs:
           docker run --detach \
             --name svg-transform-core-ci \
             --publish 127.0.0.1:4319:4310 \
-            --volume "$smoke_root/workspace:/app/workspace" \
+            --tmpfs /app/workspace:rw,uid=1000,gid=1000,mode=0700 \
             --volume "$smoke_root/model-provider.json:/app/config/model-provider.json:ro" \
             svg-transform-core:ci
           cleanup() {
@@ -120,8 +123,12 @@ jobs:
           trap cleanup EXIT
           for _ in $(seq 1 30); do
             if curl --max-time 2 --fail --silent http://127.0.0.1:4319/health | grep --quiet '^ok$'; then
-              exit 0
+              break
             fi
             sleep 1
           done
-          exit 1
+          test "$(docker exec svg-transform-core-ci id -u)" = "1000"
+          curl --max-time 2 --fail --silent http://127.0.0.1:4319/health
+          curl --max-time 10 --fail --silent \
+            -F svg=@apps/server/tests/fixtures/shared-background.svg \
+            -F dryRun=1 http://127.0.0.1:4319/api/jobs

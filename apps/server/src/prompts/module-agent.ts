@@ -225,6 +225,7 @@ function buildAgentUnitPrompt(input: {
 - source.fragment.dart 是模块局部坐标系中的单个 Widget 表达式；宿主会把它放进固定为 ${region.width}x${region.height} 的 SizedBox，并负责整页 Positioned 定位。
 - module.css 只作用于 preview.fragment.html，**不会**转换或注入 Flutter。Dart 片段必须用 Row/Column/Stack/Padding/Align/Container/Text/Image.asset 等 Widget 独立表达同一套布局、颜色、圆角、边框和文字样式，禁止留下 SizedBox 空占位冒充完成。
 - 每个 preview 中的 textBlocks 文本在 Flutter 中必须对应真实 Text Widget；每个 preview 中的 PNG 资产在 Flutter 中必须对应 Image.asset。资产优先写 \`assets/${module.id}/<文件名>\`。
+- 文本保留原文换行；lineRegions 给出原始行距及横向偏移。各行偏移不同时，在同一个文本块内部用原生 Widget 布局这些行，禁止重复输出文案。保留画布外的文本，由模块边界统一裁切。
 - 宿主统一提供 material.dart 和 flutter_svg.dart import；片段内禁止 import、声明 class/函数、调用 main/runApp，也不要引用其它包、网络资源、HTML 或 PlatformView。
 - source.fragment.dart 不使用 source-data.json；重复结构直接在表达式内用 const 列表、List.generate 或 Dart collection-for 表达。
 `
@@ -298,6 +299,7 @@ module-semantic.json 关键字段（按此优先级取用）：
 | --- | --- |
 | module.region / scale | 模块尺寸与缩放；所有坐标都相对模块左上角，单位 px |
 | textBlocks[].layoutTargetRegion | 文本的 DOM 容器框，定位文本外盒用它 |
+| textBlocks[].lineCount / lineRegions | 原有行数与每行位置，保留行距和各行的相对横向偏移 |
 | textBlocks[].styleInference | 文本样式（font-size/weight/color/line-height/letter-spacing/font-family），硬约束 |
 | generatedAssets[] | agent 已经按需导出的资产；模块启动时可以为空，不代表缺资源 |
 | generatedAssets[].path | 已导出 PNG 的模块内相对路径 |
@@ -335,7 +337,7 @@ ${methodFirstStep}
    - **重复/连续/同构区**（成组条目、矩阵、导航集合、控制集合、数据集合）→ 外层父容器用 flex 或 grid 管理宏观排列；每个 item/card/tab/row 内部继续优先用 flex/grid 表达槽位结构。禁止把同构子项拆成一堆互不关联的绝对定位叶子节点，也禁止逐个子项凭感觉微调。同构子项内部保持一致结构：媒体、文本、数值、状态、操作等用稳定 class 命名；只允许通过数据内容、状态、少量修饰 class 表达差异。
    - **自由叠放/复杂视觉区**（无稳定阅读流、多层覆盖、异形图形、复杂资产叠加）→ 允许局部使用 absolute positioning。非文本视觉尽量导出为 PNG 后在该局部叠层容器内绝对定位；**图层若对应一个已导出资产，用该资产 generatedAssets[].box 的 x/y/width/height 定位 + 定尺寸（box 是 PNG 的 CSS 放置外框，别再用节点几何框或内部可见像素框去摆图片，否则会错位/压扁）**；尚未导出的视觉块先用 nodes[].bbox/inspectIndex 判断是否需要导出。z-index 按 inspectIndex 从小到大叠；不合并/丢弃图层、不挑某节点拉伸当整块背景；压在图形上的独立文字仍按 DOM 文本还原到对应位置。
    - **absolute 使用自检**：如果一个区域的视觉关系可以描述为“顺序、对齐、分布、重复、分组、主次层级或槽位关系”，却写成多个 \`position:absolute\` 叶子节点，说明布局范式选错了，必须改成 flex/grid/padding/gap。absolute 可以包住整个局部叠层容器，但不要替代正常内容流。
-4. 文本：用 layoutTargetRegion 定位外盒，再用 styleInference 填样式。textBlocks[].text 是预处理已经合并好的最终 DOM 文案；直接放进一个 DOM 文本元素，保留原文内容，不要改写、拆分或重新识别文本。
+4. 文本：用 layoutTargetRegion 定位外盒，再用 styleInference 填样式。textBlocks[].text 是预处理已经合并好的最终 DOM 文案；每个条目只对应一个 DOM 文本元素，保留原文内容和换行，不要改写或重新识别文本。多行使用原文换行与 white-space: pre；若 lineRegions 中各行 x 不同，在同一个文本元素内用行级 span 保留相对于首行的 x/y 偏移，子行不再单独输出文案或添加 data-node-id。画布外的原文也必须保留，由模块容器按原图裁切。
 5. CSS 落地时坐标/盒模型默认四舍五入到整数 px：图片资产 box、结构节点 bbox、文本 layoutTargetRegion 的 left/top/width/height 都按整数写；textBlocks[].styleInference 的 font-size/line-height/letter-spacing/font-family/weight/color 原样使用，不因取整规则修改。
 6. **选实现手段（默认图片优先，能用 PNG 就不手绘）**：非文本视觉样式默认优先导出 PNG，模块 agent 不需要证明某个复杂视觉“不能用 CSS 实现”才导出。只有纯色背景、单层边框、简单圆角、简单横/竖条、状态点、分隔线这类简单到不能再简单的元素才用 CSS。渐变、纹理、阴影组合、clip-path 异形、mask、图标、多 path 组合、小型标记、装饰外壳、图片内容等都优先导出 PNG。一个视觉由多个节点组成时（多 path 图形、控件背景+边框+高光）用 browser-session_export_svg_node 合并导出为一张；可读 textBlocks 禁止导出。对于 textBlocks 之外的可见前景层，优先按独立视觉层导出，不要并入大块背景/容器资产。
 7. **browser-eval 是首选调试工具，verify 是最终验收工具**。三件套产物可运行后，**立即先用 browser-eval** 做局部自检，优先把内容缺失、错图、明显重叠、明显布局/裁切错误消灭在 verify 之前；在觉得自己"已经做完了"、所有关键元素位置都正确对齐之后，再运行 verify。不要把 verify 当调试工具频繁运行——每轮 verify 成本高，应该只有在 browser-eval 显示布局基本对齐后再进 verify 做最终 diff 检查。

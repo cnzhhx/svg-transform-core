@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 
 import react from "@vitejs/plugin-react";
+import { resourcePool } from './resources.js';
 import vue from "@vitejs/plugin-vue";
 import { build } from "vite";
 
@@ -276,7 +277,7 @@ const buildFrameworkProject = async ({
   const rootDir = await realpath(entryDir);
   const outDir = path.resolve(rootDir, path.relative(entryDir, distDir));
 
-  await build({
+  await resourcePool('build').run(() => build({
     base: "./",
     build: {
       assetsInlineLimit: 0,
@@ -292,7 +293,7 @@ const buildFrameworkProject = async ({
       dedupe: format === "vue" ? ["vue"] : ["react", "react-dom"],
     },
     root: rootDir,
-  });
+  }));
 };
 
 const inlineFrameworkDistHtml = async ({

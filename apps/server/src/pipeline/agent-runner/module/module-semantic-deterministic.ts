@@ -119,13 +119,29 @@ const buildDeterministicSemantic = (
       textHandling: "ignore",
     };
   }
-  if ((node.tag === "text" || node.tag === "tspan") && text) {
+  if (node.tag === "tspan") {
+    return {
+      confidence: 1,
+      containsReadableText: false,
+      exportDecision: "skip",
+      kind: "container",
+      notes: "text and line geometry are represented by the owning text element",
+      textHandling: "ignore",
+    };
+  }
+  if (node.tag === "text" && text) {
+    const lines = node.nativeTextLines;
     return {
       confidence: 1,
       containsReadableText: true,
       exportDecision: "skip",
       kind: "text",
-      text,
+      text: lines?.length ? lines.map((line) => line.text).join("\n") : text,
+      ...(lines?.length ? {
+        lineCount: lines.length,
+        lineRegions: lines.map((line) => line.region),
+        visualLines: lines.map((line) => line.text),
+      } : {}),
       textHandling: "dom-text",
       textKind: "svg-text",
     };

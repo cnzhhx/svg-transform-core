@@ -6,10 +6,12 @@ import type {
   ModelProviderConfig,
 } from "../config/model-provider.js";
 import { getAgentRuntime } from "./agent-runtime/index.js";
+import { AgentRuntimeError } from "./agent-runtime/errors.js";
 import type {
   AgentInput,
   AgentRunStreamedResult,
   AgentThread,
+  AgentThreadEvent,
   AgentTurnMetrics,
   AgentTurn,
   ThreadOptions,
@@ -17,8 +19,10 @@ import type {
 import { AGENT_REASONING_EFFORTS } from "../config/agent-reasoning.js";
 import {
   getModelUsageContextModel,
+  recordModelRetry,
   recordModelUsage,
 } from "./model-usage.js";
+import { ModelResponseError, runWithModelRetries, streamWithModelRetries } from "./model-retry.js";
 
 const createThreadOptions = (
   modelConfig: Pick<ModelProviderConfig, "model" | "reasoningEffort">,
@@ -57,62 +61,97 @@ const trackThreadUsage = ({
   modelRole,
   source,
   thread,
+  restartThread,
 }: {
   modelConfig: ModelProviderConfig;
   modelRole: ModelConfigRole;
   source?: string;
   thread: AgentThread;
-}): AgentThread => ({
-  get id() {
-    return thread.id;
-  },
+  restartThread: () => AgentThread;
+}): AgentThread => {
+  let currentThread = thread;
+  const onRetry = (retry: Parameters<typeof recordModelRetry>[0]) =>
+    recordModelRetry(retry, { source });
+  return {
+    get id() {
+      return currentThread.id;
+    },
 
-  async run(
-    input: AgentInput,
-    turnOptions?: { signal?: AbortSignal },
-  ): Promise<AgentTurn> {
-    const turn = await thread.run(input, turnOptions);
-    recordModelUsage({
-      inputKind: getInputKind(input),
-      metrics: turn.metrics,
-      modelConfig,
-      modelRole,
-      source,
-      threadId: thread.id,
-      usage: turn.usage,
-    });
-    return turn;
-  },
+    async run(
+      input: AgentInput,
+      turnOptions?: { signal?: AbortSignal },
+    ): Promise<AgentTurn> {
+      return runWithModelRetries({
+        signal: turnOptions?.signal,
+        onRetry,
+        run: async (retry) => {
+          if (retry?.freshThread) currentThread = restartThread();
+          const turn = await currentThread.run(input, turnOptions);
+          recordModelUsage({
+            inputKind: getInputKind(input),
+            metrics: turn.metrics,
+            modelConfig,
+            modelRole,
+            source,
+            threadId: currentThread.id,
+            usage: turn.usage,
+          });
+          if (!turn.finalResponse.trim()) throw new ModelResponseError('Model returned an empty response');
+          return turn;
+        },
+      });
+    },
 
-  async runStreamed(
-    input: AgentInput,
-    turnOptions?: { signal?: AbortSignal },
-  ): Promise<AgentRunStreamedResult> {
-    const streamed = await thread.runStreamed(input, turnOptions);
-    return {
-      events: (async function* () {
-        let metrics: AgentTurnMetrics | undefined;
-        for await (const event of streamed.events) {
-          if (event.type === "turn.metrics") {
-            metrics = event.metrics;
-          }
-          if (event.type === "turn.completed") {
-            recordModelUsage({
-              inputKind: getInputKind(input),
-              metrics,
-              modelConfig,
-              modelRole,
-              source,
-              threadId: thread.id,
-              usage: event.usage,
+    async runStreamed(
+      input: AgentInput,
+      turnOptions?: { signal?: AbortSignal },
+    ): Promise<AgentRunStreamedResult> {
+      return {
+        events: (async function* (): AsyncGenerator<AgentThreadEvent> {
+          try {
+            yield* streamWithModelRetries({
+              signal: turnOptions?.signal,
+              onRetry,
+              run: async function* (retry): AsyncGenerator<AgentThreadEvent> {
+                if (retry?.freshThread) currentThread = restartThread();
+                const streamed = await currentThread.runStreamed(input, turnOptions);
+                let metrics: AgentTurnMetrics | undefined;
+                let completed = false;
+                let hasOutput = false;
+                for await (const event of streamed.events) {
+                  if (event.type === 'turn.failed') throw new AgentRuntimeError(event.error);
+                  if (event.type === 'turn.metrics') metrics = event.metrics;
+                  if (event.type === 'item.completed' && (
+                    event.item.type === 'agent_message' && event.item.text.trim() ||
+                    event.item.type === 'command_execution' || event.item.type === 'file_change' ||
+                    event.item.type === 'mcp_tool_call'
+                  )) hasOutput = true;
+                  if (event.type === 'turn.completed') {
+                    recordModelUsage({
+                      inputKind: getInputKind(input), metrics, modelConfig, modelRole,
+                      source, threadId: currentThread.id, usage: event.usage,
+                    });
+                    if (!hasOutput) throw new ModelResponseError('Model returned an empty response');
+                    completed = true;
+                  }
+                  yield event;
+                }
+                if (!completed) throw new AgentRuntimeError({
+                  message: 'Model stream ended without completing', code: 'MODEL_STREAM_INCOMPLETE',
+                });
+              },
             });
+          } catch (error) {
+            if (!(error instanceof AgentRuntimeError)) throw error;
+            yield { type: 'turn.failed', error: {
+              name: error.name, message: error.message, code: error.code, statusCode: error.statusCode,
+            } };
           }
-          yield event;
-        }
-      })(),
-    };
-  },
-});
+        })(),
+      };
+    },
+  };
+};
 
 const getInputKind = (input: AgentInput) =>
   Array.isArray(input) && input.some((item) => item.type === "local_image")
@@ -139,6 +178,7 @@ const startAgentThread = (
     thread: runtime.startThread(
       applyThreadOptionDefaults(modelConfig, options),
     ),
+    restartThread: () => runtime.startThread(applyThreadOptionDefaults(modelConfig, options)),
   });
 };
 
@@ -164,6 +204,7 @@ const resumeAgentThread = (
       id,
       applyThreadOptionDefaults(modelConfig, options),
     ),
+    restartThread: () => runtime.startThread(applyThreadOptionDefaults(modelConfig, options)),
   });
 };
 
@@ -182,7 +223,7 @@ const runVisionLlm = async ({
 }): Promise<string> => {
   const thread = startAgentThread(
     {
-      modelReasoningEffort: AGENT_REASONING_EFFORTS.support,
+      modelReasoningEffort: AGENT_REASONING_EFFORTS.vision,
       runtimeTraceDir,
       runtimeTraceLabel,
     },

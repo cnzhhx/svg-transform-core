@@ -4,8 +4,10 @@ import { mkdir } from 'node:fs/promises'
 import express from 'express'
 
 import { detectBrowserBinary } from './core/cdp.js'
+import { checkReadiness } from './core/readiness.js'
 import { setWorkspaceRoot } from './core/paths.js'
-import { processQueuedSessions } from './pipeline/agent-runner/index.js'
+import { processQueuedSessions, shutdownAgentQueue, queueSettings } from './pipeline/agent-runner/index.js'
+import { createQueueSettingsRouter } from './routes/queue-settings.js'
 import eventsRouter from './routes/events.js'
 import jobsRouter from './routes/jobs.js'
 import { sessionStore } from './session-store.js'
@@ -45,12 +47,21 @@ const handleHealth = (_req: express.Request, res: express.Response) => {
 const router = express.Router()
 
 router.all('/health', handleHealth)
+router.get('/ready', async (_req, res) => {
+  try {
+    const readiness = await checkReadiness()
+    res.status(readiness.ready ? 200 : 503).json(readiness)
+  } catch {
+    res.status(503).json({ ready: false, error: 'Invalid runtime configuration' })
+  }
+})
 
 router.use(express.json())
 
 // API routes
 router.use('/api', jobsRouter)
 router.use('/api', eventsRouter)
+router.use('/api', createQueueSettingsRouter(queueSettings, processQueuedSessions))
 
 router.get('/', (_req, res) => {
   res.json({
@@ -61,13 +72,20 @@ router.get('/', (_req, res) => {
 })
 
 app.use(router)
+app.use((error: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) { next(error); return }
+  console.error('[request]', error)
+  res.status(500).json({ error: error instanceof Error ? error.message : 'Request failed' })
+})
 
 const main = async () => {
   await mkdir(WORKSPACE, { recursive: true })
+  await queueSettings.initialize()
   await sessionStore.hydrateFromDisk()
+  await sessionStore.flushAll()
   processQueuedSessions()
 
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
     const browserBinary = detectBrowserBinary()
 
     console.log(`SVG transform core service running at http://localhost:${PORT}`)
@@ -77,6 +95,26 @@ const main = async () => {
     console.log(`Browser Binary: ${browserBinary ?? 'NOT FOUND'}`)
     console.log(`Build Time: ${BUILD_TIME}`)
   })
+  let shuttingDown = false
+  const shutdown = async () => {
+    if (shuttingDown) return
+    shuttingDown = true
+    server.close()
+    const deadline = setTimeout(() => process.exit(1), 30_000)
+    deadline.unref()
+    try {
+      await shutdownAgentQueue()
+      await sessionStore.flushAll()
+      server.closeAllConnections()
+      clearTimeout(deadline)
+      process.exit(0)
+    } catch (error) {
+      console.error('Shutdown persistence failed:', error)
+      process.exit(1)
+    }
+  }
+  process.once('SIGTERM', () => void shutdown())
+  process.once('SIGINT', () => void shutdown())
 }
 
 main().catch((error) => {

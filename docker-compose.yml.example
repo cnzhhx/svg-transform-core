@@ -2,6 +2,8 @@ services:
   svg-transform-core:
     build: .
     image: svg-transform-core:local
+    init: true
+    stop_grace_period: 35s
     ports:
       - "127.0.0.1:4310:4310"
     environment:
@@ -13,5 +15,6 @@ services:
     # env_file:
     #   - ./.runtime/core.env
     volumes:
+      # Image runs as uid/gid 1000. This host directory must be writable by 1000.
       - ./workspace:/app/workspace
       - ./.runtime/model-provider.json:/app/config/model-provider.json:ro

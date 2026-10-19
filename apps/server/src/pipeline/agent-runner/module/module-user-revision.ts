@@ -21,7 +21,8 @@ import {
   runAgentUnit,
   setModuleActive,
 } from "./agent-unit.js";
-import { readModuleSemanticDocument } from "./module-semantic.js";
+import { createModuleSemanticDraft, ensureModuleContextImages, isModuleSemanticInputCurrent, readModuleSemanticDocument } from "./module-semantic.js";
+import { resourcePool } from '../../../core/resources.js';
 import {
   ensureModuleSvg,
   getModuleDir,
@@ -42,6 +43,7 @@ import {
   type ModulePipelineV2Result,
 } from "./module-pipeline-shared.js";
 import {
+  preprocessModuleSemantic,
   readAgentGeneratedAssetCount,
 } from "./module-semantic-preprocess.js";
 import {
@@ -168,13 +170,24 @@ async function runModuleUserRevisionTurn(
     modulesRootDir,
   });
   throwIfRunAborted(controller);
+  const refreshSemantic = !await isModuleSemanticInputCurrent({ moduleDir, moduleSvgPath, module, scale: design.scale });
+  if (refreshSemantic) {
+    sessionStore.addLog(sessionId, `[module-user-revision:${module.id}] refreshing changed module preprocessing`);
+    await resourcePool('reference').run(() => ensureModuleContextImages({
+      module, moduleDir, moduleSvgPath, sharedLayers: modulePlan.sharedLayers ?? [], scale: design.scale,
+    }), controller.signal);
+    await createModuleSemanticDraft({ module, moduleDir, moduleSvgPath, scale: design.scale });
+    await preprocessModuleSemantic({ controller, design, module, moduleDir, moduleSvgPath, sessionId,
+      visionSemaphore: resourcePool('vision') });
+    throwIfRunAborted(controller);
+  }
   const moduleSemantic = await readModuleSemanticDocument(moduleDir);
   if (!moduleSemantic) {
     throw new Error(`module semantic not available for user revision: ${module.id}`);
   }
   sessionStore.addLog(
     sessionId,
-    `[module-user-revision:${module.id}] reusing existing module semantic for fast user revision`,
+    `[module-user-revision:${module.id}] ${refreshSemantic ? 'refreshed' : 'reusing current'} module semantic for user revision`,
   );
   throwIfRunAborted(controller);
 
@@ -388,6 +401,9 @@ async function runModuleUserRevisionTurn(
   throwIfRunAborted(controller);
   let selectedModuleOutputError: string | undefined;
   let selectedModuleOutputFailureKind: ModuleValidationFailureKind | undefined;
+  if (result.success && hasCompleteModuleOutput(moduleDir, outputFormat)) {
+    sessionStore.acknowledgeModuleMessages(sessionId, module.id);
+  }
   if (!hasCompleteModuleOutput(moduleDir, outputFormat)) {
     selectedModuleOutputError = "incomplete module output";
     selectedModuleOutputFailureKind = "incomplete_output";
@@ -395,6 +411,10 @@ async function runModuleUserRevisionTurn(
       sessionId,
       `[module-user-revision:${module.id}] incomplete module output after user revision`,
     );
+  }
+  if (!selectedModuleOutputError && (result.finalDiffRatio === undefined || result.finalDiffRatio > getModuleDiffRatioThreshold())) {
+    selectedModuleOutputError = `Module visual verification did not pass: ${result.finalDiffRatio ?? 'missing score'}`;
+    selectedModuleOutputFailureKind = 'module_visual_failed';
   }
   let mergeSkippedModuleIds: string[] = [];
   let mergeSkippedModules: Array<{ error: string; id: string }> = [];
@@ -536,6 +556,9 @@ async function runModuleUserRevision(
   input: ModuleUserRevisionInput,
 ): Promise<ModulePipelineV2Result> {
   const revision = await runModuleUserRevisionTurn(input);
+  if (revision.failedModuleIds.some((id) => revision.moduleFailureKinds[id] !== 'module_visual_failed')) {
+    throw new Error(`Module revision has structural failures: ${revision.failedModuleIds.join(', ')}`);
+  }
   const finalVerifyResult = await runVerify(
     input.sessionId,
     input.design.svgPath,

@@ -69,6 +69,7 @@ const eventForApi = (event: SessionEvent) => {
   const { sessionId, ...rest } = event
   return {
     ...rest,
+    type: event.type === 'session:deleted' ? 'job:deleted' : event.type,
     jobId: sessionId,
   }
 }
@@ -92,11 +93,13 @@ router.get('/jobs/:id/events', (req: Request, res: Response) => {
 
   let closed = false
   let heartbeat: NodeJS.Timeout | undefined
+  let updateTimer: NodeJS.Timeout | undefined
 
   const cleanup = () => {
     if (closed) return
     closed = true
     if (heartbeat) clearInterval(heartbeat)
+    if (updateTimer) clearTimeout(updateTimer)
     sessionStore.off(`session:${sessionId}`, listener)
   }
 
@@ -112,6 +115,11 @@ router.get('/jobs/:id/events', (req: Request, res: Response) => {
     }
 
     try {
+      if (res.writableLength > 1024 * 1024) {
+        cleanup()
+        res.destroy()
+        return false
+      }
       res.write(payload)
       return true
     } catch (error) {
@@ -126,6 +134,9 @@ router.get('/jobs/:id/events', (req: Request, res: Response) => {
   const listener = (event: SessionEvent) => {
     if (!shouldPushEventToFrontend(event)) return
     if (event.type === 'session:updated') {
+      if (updateTimer) return
+      updateTimer = setTimeout(() => {
+      updateTimer = undefined
       const nextSession = sessionStore.get(event.sessionId)
       if (nextSession) {
         writeEventStream(
@@ -137,9 +148,11 @@ router.get('/jobs/:id/events', (req: Request, res: Response) => {
           })}\n\n`,
         )
       }
+      }, 100)
       return
     }
     writeEventStream(`data: ${JSON.stringify(eventForApi(event))}\n\n`)
+    if (event.type === 'session:deleted') { cleanup(); res.end() }
   }
 
   res.on('error', (error) => {

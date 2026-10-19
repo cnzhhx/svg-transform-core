@@ -1,4 +1,13 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
+import {
+  assertAgentProcessCanStart,
+  createAgentProcessCleanup,
+  getAgentProcessSignal,
+  registerAgentProcess,
+} from "./process-lifecycle.js";
+import { createAgentEnvironment } from './environment.js';
+import { AgentRuntimeError, type AgentRuntimeFailure } from './errors.js';
+import { resourcePool } from '../../core/resources.js';
 import { randomUUID } from "node:crypto";
 import { appendFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -56,7 +65,6 @@ const MAX_REASONING_EVENT_CHARS = 8000;
 const STDERR_SAMPLE_CHARS = 4000;
 const TEXT_SAMPLE_CHARS = 200;
 const THINK_SAMPLE_RECORD_LIMIT = 8;
-const ABORT_SIGKILL_GRACE_MS = 5000;
 
 const trimToUndefined = (value: string | undefined | null) => {
   const trimmed = value?.trim();
@@ -81,24 +89,6 @@ const appendTailSample = (
 ) => {
   const merged = `${current}${next}`;
   return merged.length <= maxChars ? merged : merged.slice(-maxChars);
-};
-
-const killChildProcessGroup = (child: ChildProcess, signal: NodeJS.Signals) => {
-  if (!child.pid || child.exitCode !== null || child.signalCode !== null)
-    return;
-  try {
-    if (process.platform !== "win32") {
-      process.kill(-child.pid, signal);
-      return;
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
-  }
-  try {
-    child.kill(signal);
-  } catch {
-    // Process already exited between the status check and kill.
-  }
 };
 
 const readNumber = (value: unknown) =>
@@ -310,6 +300,14 @@ const createOpencodeConfigFile = async ({
 }) => {
   const dir = await mkdtemp(path.join(tmpdir(), "svg-opencode-config-"));
   const configPath = path.join(dir, "config.json");
+  const providerConfigPath = path.join(dir, 'model-provider.json');
+  await writeFile(providerConfigPath, JSON.stringify({ models: { [modelConfig.id]: {
+    runtime: modelConfig.runtime, wireApi: modelConfig.wireApi,
+    provider: modelConfig.provider ?? modelConfig.providerLabel,
+    baseURL: modelConfig.baseURL, model: modelConfig.model,
+    apiKeyEnv: 'SVG_TRANSFORM_AGENT_API_KEY', headers: modelConfig.headers,
+    reasoningEffort: modelConfig.reasoningEffort, modalities: modelConfig.modalities,
+  } } }), { encoding: 'utf8', mode: 0o600 });
   const allowEdits = options.sandboxMode !== "read-only";
   const allowNetwork = options.networkAccessEnabled !== false;
   const allowWebSearch = allowNetwork && options.webSearchEnabled !== false;
@@ -340,7 +338,11 @@ const createOpencodeConfigFile = async ({
         permission: {
           bash: allowEdits ? "allow" : "deny",
           edit: allowEdits ? "allow" : "deny",
-          external_directory: "allow",
+          external_directory: process.env['AGENT_EXTERNAL_DIRECTORY_POLICY'] === 'allow' ? 'allow' : {
+            '*': 'deny',
+            ...Object.fromEntries([options.workingDirectory, ...(options.additionalDirectories ?? []), process.cwd()]
+              .filter((dir): dir is string => Boolean(dir)).map((dir) => [`${path.resolve(dir).replaceAll(path.sep, '/')}/**`, 'allow'])),
+          },
           webfetch: allowNetwork ? "allow" : "deny",
         },
         provider: {
@@ -439,6 +441,7 @@ const createOpencodeConfigFile = async ({
   return {
     cleanup: () => rm(dir, { force: true, recursive: true }),
     configPath,
+    providerConfigPath,
   };
 };
 
@@ -469,6 +472,25 @@ const extractErrorMessage = (event: OpencodeEvent) => {
     trimToUndefined(readString(data?.ref)) ??
     "OpenCode runtime failed."
   );
+};
+
+const extractRuntimeFailure = (event: OpencodeEvent): AgentRuntimeFailure => {
+  const error = readRecord(event.error);
+  const data = readRecord(error?.data);
+  let responseBody = readRecord(data?.responseBody);
+  if (!responseBody && typeof data?.responseBody === 'string') {
+    try { responseBody = readRecord(JSON.parse(data.responseBody)); } catch { /* Non-JSON upstream responses retain their original message. */ }
+  }
+  const upstream = readRecord(responseBody?.error) ?? responseBody;
+  const message = extractErrorMessage(event);
+  const upstreamMessage = readString(upstream?.message);
+  const status = Number(data?.statusCode ?? data?.status ?? error?.statusCode ?? error?.status);
+  return {
+    message: upstreamMessage && !message.includes(upstreamMessage) ? `${message}: ${upstreamMessage}` : message,
+    name: readString(error?.name),
+    code: readString(data?.code) ?? readString(error?.code) ?? readString(upstream?.code) ?? readString(upstream?.type),
+    ...(Number.isInteger(status) && status >= 100 && status <= 599 ? { statusCode: status } : {}),
+  };
 };
 
 const extractFileChanges = (metadata: Record<string, unknown> | undefined) =>
@@ -799,7 +821,7 @@ class OpencodeThread implements AgentThread {
     let finalResponse = "";
     let metrics: AgentTurnMetrics | undefined;
     let usage: Usage | null = null;
-    let turnFailure: string | null = null;
+    let turnFailure: AgentRuntimeFailure | null = null;
 
     for await (const event of streamed.events) {
       if (event.type === "item.completed") {
@@ -812,16 +834,33 @@ class OpencodeThread implements AgentThread {
       } else if (event.type === "turn.metrics") {
         metrics = event.metrics;
       } else if (event.type === "turn.failed") {
-        turnFailure = event.error.message;
+        turnFailure = event.error;
         break;
       }
     }
 
-    if (turnFailure) throw new Error(turnFailure);
+    if (turnFailure) throw new AgentRuntimeError(turnFailure);
     return { finalResponse, items, metrics, usage };
   }
 
   private async *runStreamedInternal(
+    input: AgentInput,
+    turnOptions: { signal?: AbortSignal },
+  ): AsyncGenerator<AgentThreadEvent> {
+    assertAgentProcessCanStart();
+    const sessionSignal = getAgentProcessSignal();
+    const signal = sessionSignal && turnOptions.signal
+      ? AbortSignal.any([sessionSignal, turnOptions.signal])
+      : sessionSignal ?? turnOptions.signal;
+    const release = await resourcePool('model').lease(signal);
+    try {
+      yield* this.runStreamedWithSlot(input, { ...turnOptions, signal });
+    } finally {
+      release();
+    }
+  }
+
+  private async *runStreamedWithSlot(
     input: AgentInput,
     turnOptions: { signal?: AbortSignal },
   ): AsyncGenerator<AgentThreadEvent> {
@@ -849,7 +888,7 @@ class OpencodeThread implements AgentThread {
       modelConfig: this.modelConfig,
       options: this.options,
     });
-    const { cleanup, configPath } = await createOpencodeConfigFile({
+    const { cleanup, configPath, providerConfigPath } = await createOpencodeConfigFile({
       modelConfig: this.modelConfig,
       modelRef,
       options: this.options,
@@ -892,13 +931,23 @@ class OpencodeThread implements AgentThread {
     }
     args.push(normalizedInput.message);
 
-    const child = spawn(getBackendConfig().runtime.opencodeCliPath, args, {
+    let opencodeCliPath: string;
+    try {
+      assertAgentProcessCanStart();
+      turnOptions.signal?.throwIfAborted();
+      opencodeCliPath = getBackendConfig().runtime.opencodeCliPath;
+    } catch (error) {
+      await cleanup();
+      throw error;
+    }
+    const child = spawn(opencodeCliPath, args, {
       cwd: this.options.workingDirectory ?? process.cwd(),
       detached: process.platform !== "win32",
       env: {
-        ...process.env,
-        ...this.options.environment,
+        ...createAgentEnvironment(process.env, this.options.environment),
         OPENCODE_CONFIG: configPath,
+        MODEL_PROVIDER_CONFIG: providerConfigPath,
+        SVG_TRANSFORM_AGENT_API_KEY: this.modelConfig.apiKey,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -932,6 +981,11 @@ class OpencodeThread implements AgentThread {
       childEvents.once("exit", (code, signal) => settle({ code, signal }));
     });
 
+    const stopProcess = createAgentProcessCleanup(child, exitPromise);
+    const unregisterProcess = registerAgentProcess(stopProcess);
+    // Inherited pipes can outlive OpenCode; close its remaining tools on exit
+    // so the output reader can finish and release the global model lease.
+    void exitPromise.then(() => stopProcess()).catch(() => {});
     const rl = readline.createInterface({
       crlfDelay: Infinity,
       input: child.stdout,
@@ -939,20 +993,17 @@ class OpencodeThread implements AgentThread {
 
     let stderr = "";
     let turnFailed: string | null = null;
+    let runtimeFailure: AgentRuntimeFailure | undefined;
     let totalUsage: Usage | null = null;
     const finalMessages: string[] = [];
     let abortRequested = false;
-    let abortKillTimer: ReturnType<typeof setTimeout> | undefined;
     let sawThreadStarted = Boolean(this._id);
 
     const abort = () => {
       if (abortRequested) return;
       abortRequested = true;
-      killChildProcessGroup(child, "SIGTERM");
-      abortKillTimer = setTimeout(() => {
-        killChildProcessGroup(child, "SIGKILL");
-      }, ABORT_SIGKILL_GRACE_MS);
-      abortKillTimer.unref?.();
+      // Awaited by the stream's finally and its owning session scope.
+      void stopProcess().catch(() => {});
     };
     turnOptions.signal?.addEventListener("abort", abort, { once: true });
     if (turnOptions.signal?.aborted) abort();
@@ -985,11 +1036,13 @@ class OpencodeThread implements AgentThread {
         }
 
         if (parsed.type === "error") {
-          const message = extractErrorMessage(parsed);
+          const failure = extractRuntimeFailure(parsed);
+          const message = failure.message;
           providerTelemetry.errorMessages.push(message);
           providerTelemetry.errorBodies.push(trimmed);
           yield { message, type: "error" };
           turnFailed = turnFailed ?? message;
+          runtimeFailure ??= failure;
           continue;
         }
 
@@ -1040,25 +1093,32 @@ class OpencodeThread implements AgentThread {
           );
         }
       }
+      // stdout can close before normal exit; keep cancellation installed.
+      await exitPromise;
     } finally {
       rl.close();
-      turnOptions.signal?.removeEventListener("abort", abort);
+      try {
+        await stopProcess();
+      } finally {
+        turnOptions.signal?.removeEventListener("abort", abort);
+        unregisterProcess();
+        await cleanup();
+      }
     }
 
     const exit = await exitPromise;
-    if (abortKillTimer) clearTimeout(abortKillTimer);
     providerTelemetry.exitCode = exit.code;
     providerTelemetry.exitSignal = exit.signal;
     providerTelemetry.stderrTail = trimToUndefined(stderr);
 
-    await cleanup();
-
     if (abortRequested || turnOptions.signal?.aborted) {
       turnFailed = `aborted: ${String(turnOptions.signal?.reason ?? "aborted")}`;
+      runtimeFailure = { message: turnFailed, name: 'AbortError' };
     } else if (exit.error) {
       turnFailed = `Failed to start OpenCode CLI: ${exit.error.message}`;
     } else if (exit.code !== 0 || exit.signal) {
       turnFailed =
+        turnFailed ??
         trimToUndefined(stderr) ??
         `OpenCode CLI exited with ${exit.signal ? `signal ${exit.signal}` : `code ${exit.code ?? 1}`}`;
     }
@@ -1068,7 +1128,7 @@ class OpencodeThread implements AgentThread {
     if (turnFailed) {
       yield { metrics, type: "turn.metrics" };
       yield {
-        error: { message: turnFailed },
+        error: { ...runtimeFailure, message: turnFailed },
         type: "turn.failed",
       };
       return;
