@@ -1,4 +1,4 @@
-FROM node:22.16.0-bookworm-slim AS base
+FROM node:26.12.0-bookworm-slim AS base
 
 ARG DEBIAN_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/debian
 ARG DEBIAN_SECURITY_MIRROR=http://mirrors.tuna.tsinghua.edu.cn/debian-security
